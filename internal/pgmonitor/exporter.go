@@ -1,17 +1,6 @@
-/*
- Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
- http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+// Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
 
 package pgmonitor
 
@@ -160,11 +149,11 @@ func ExporterStartCommand(builtinCollectors bool, commandFlags ...string) []stri
 
 		// Create a file descriptor with a no-op process that will not get
 		// cleaned up
-		`exec {fd}<> <(:)`,
+		`exec {fd}<> <(:||:)`,
 
 		// Set up loop. Use read's timeout setting instead of sleep,
 		// which uses up a lot of memory
-		`while read -r -t 3 -u "${fd}" || true; do`,
+		`while read -r -t 3 -u "${fd}" ||:; do`,
 
 		// If either directories' modify time is newer than our file descriptor's,
 		// something must have changed, so kill the postgres_exporter
@@ -174,14 +163,14 @@ func ExporterStartCommand(builtinCollectors bool, commandFlags ...string) []stri
 		// When something changes we want to get rid of the old file descriptor, get a fresh one
 		// and restart the loop
 		`    echo "Something changed..."`,
-		`    exec {fd}>&- && exec {fd}<> <(:)`,
+		`    exec {fd}>&- && exec {fd}<> <(:||:)`,
 		`    stat --format='Latest queries file dated %y' "/conf"`,
 		`    stat --format='Latest password file dated %y' "/opt/crunchy/password"`,
 		`  fi`,
 
 		// If postgres_exporter is not running, restart it
 		// Use the recorded pid as a proxy for checking if postgres_exporter is running
-		`  if [ ! -e /proc/$(head -1 ${POSTGRES_EXPORTER_PIDFILE?}) ] ; then`,
+		`  if [[ ! -e /proc/$(head -1 ${POSTGRES_EXPORTER_PIDFILE?}) ]] ; then`,
 		`    start_postgres_exporter`,
 		`  fi`,
 		`done`,

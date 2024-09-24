@@ -1,20 +1,6 @@
-//go:build envtest
-// +build envtest
-
-/*
- Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
- http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+// Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
 
 package postgrescluster
 
@@ -155,7 +141,7 @@ func TestGeneratePGAdminService(t *testing.T) {
 			assert.NilError(t, err)
 			assert.Assert(t, !specified)
 
-			assert.Assert(t, marshalMatches(service.ObjectMeta, `
+			assert.Assert(t, cmp.MarshalMatches(service.ObjectMeta, `
 creationTimestamp: null
 name: my-cluster-pgadmin
 namespace: my-ns
@@ -168,11 +154,11 @@ namespace: my-ns
 	}
 
 	alwaysExpect := func(t testing.TB, service *corev1.Service) {
-		assert.Assert(t, marshalMatches(service.TypeMeta, `
+		assert.Assert(t, cmp.MarshalMatches(service.TypeMeta, `
 apiVersion: v1
 kind: Service
 		`))
-		assert.Assert(t, marshalMatches(service.ObjectMeta, `
+		assert.Assert(t, cmp.MarshalMatches(service.ObjectMeta, `
 creationTimestamp: null
 labels:
   postgres-operator.crunchydata.com/cluster: my-cluster
@@ -266,7 +252,7 @@ ownerReferences:
 		alwaysExpect(t, service)
 		// Defaults to ClusterIP.
 		assert.Equal(t, service.Spec.Type, corev1.ServiceTypeClusterIP)
-		assert.Assert(t, marshalMatches(service.Spec.Ports, `
+		assert.Assert(t, cmp.MarshalMatches(service.Spec.Ports, `
 - name: pgadmin
   port: 5050
   protocol: TCP
@@ -299,7 +285,7 @@ ownerReferences:
 			assert.Assert(t, specified)
 			alwaysExpect(t, service)
 			test.Expect(t, service)
-			assert.Assert(t, marshalMatches(service.Spec.Ports, `
+			assert.Assert(t, cmp.MarshalMatches(service.Spec.Ports, `
 - name: pgadmin
   port: 5050
   protocol: TCP
@@ -324,7 +310,7 @@ ownerReferences:
 				assert.NilError(t, err)
 				assert.Equal(t, service.Spec.Type, corev1.ServiceTypeNodePort)
 				alwaysExpect(t, service)
-				assert.Assert(t, marshalMatches(service.Spec.Ports, `
+				assert.Assert(t, cmp.MarshalMatches(service.Spec.Ports, `
 - name: pgadmin
   nodePort: 32001
   port: 5050
@@ -337,7 +323,7 @@ ownerReferences:
 				assert.NilError(t, err)
 				assert.Equal(t, service.Spec.Type, corev1.ServiceTypeLoadBalancer)
 				alwaysExpect(t, service)
-				assert.Assert(t, marshalMatches(service.Spec.Ports, `
+				assert.Assert(t, cmp.MarshalMatches(service.Spec.Ports, `
 - name: pgadmin
   nodePort: 32002
   port: 5050
@@ -701,7 +687,7 @@ func TestReconcilePGAdminDataVolume(t *testing.T) {
 		assert.Equal(t, pvc.Labels[naming.LabelRole], naming.RolePGAdmin)
 		assert.Equal(t, pvc.Labels[naming.LabelData], naming.DataPGAdmin)
 
-		assert.Assert(t, marshalMatches(pvc.Spec, `
+		assert.Assert(t, cmp.MarshalMatches(pvc.Spec, `
 accessModes:
 - ReadWriteOnce
 resources:
@@ -756,6 +742,10 @@ func TestReconcilePGAdminUsers(t *testing.T) {
 	t.Run("PodTerminating", func(t *testing.T) {
 		pod := pod.DeepCopy()
 
+		// Must add finalizer when adding deletion timestamp otherwise fake client will panic:
+		// https://github.com/kubernetes-sigs/controller-runtime/pull/2316
+		pod.Finalizers = append(pod.Finalizers, "some-finalizer")
+
 		pod.DeletionTimestamp = new(metav1.Time)
 		*pod.DeletionTimestamp = metav1.Now()
 		pod.Status.ContainerStatuses =
@@ -784,7 +774,7 @@ func TestReconcilePGAdminUsers(t *testing.T) {
 
 		calls := 0
 		r.PodExec = func(
-			namespace, pod, container string,
+			ctx context.Context, namespace, pod, container string,
 			stdin io.Reader, stdout, stderr io.Writer, command ...string,
 		) error {
 			calls++
@@ -862,7 +852,7 @@ func pgAdminTestCluster(ns corev1.Namespace) *v1beta1.PostgresCluster {
 						Volume: &v1beta1.RepoPVC{
 							VolumeClaimSpec: corev1.PersistentVolumeClaimSpec{
 								AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-								Resources: corev1.ResourceRequirements{
+								Resources: corev1.VolumeResourceRequirements{
 									Requests: corev1.ResourceList{
 										corev1.ResourceStorage: resource.MustParse("1Gi"),
 									},
@@ -877,7 +867,7 @@ func pgAdminTestCluster(ns corev1.Namespace) *v1beta1.PostgresCluster {
 					Image: "test-image",
 					DataVolumeClaimSpec: corev1.PersistentVolumeClaimSpec{
 						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-						Resources: corev1.ResourceRequirements{
+						Resources: corev1.VolumeResourceRequirements{
 							Requests: corev1.ResourceList{
 								corev1.ResourceStorage: resource.MustParse("1Gi"),
 							},

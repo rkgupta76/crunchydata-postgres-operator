@@ -1,17 +1,6 @@
-/*
- Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
- http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+// Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
 
 package postgres
 
@@ -22,9 +11,9 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/crunchydata/postgres-operator/internal/config"
+	"github.com/crunchydata/postgres-operator/internal/feature"
 	"github.com/crunchydata/postgres-operator/internal/initialize"
 	"github.com/crunchydata/postgres-operator/internal/naming"
-	"github.com/crunchydata/postgres-operator/internal/util"
 	"github.com/crunchydata/postgres-operator/pkg/apis/postgres-operator.crunchydata.com/v1beta1"
 )
 
@@ -195,7 +184,7 @@ func InstancePod(ctx context.Context,
 		ImagePullPolicy: container.ImagePullPolicy,
 		SecurityContext: initialize.RestrictedSecurityContext(),
 
-		VolumeMounts: []corev1.VolumeMount{certVolumeMount},
+		VolumeMounts: []corev1.VolumeMount{certVolumeMount, dataVolumeMount},
 	}
 
 	if inInstanceSpec.Sidecars != nil &&
@@ -207,7 +196,7 @@ func InstancePod(ctx context.Context,
 	startup := corev1.Container{
 		Name: naming.ContainerPostgresStartup,
 
-		Command: startupCommand(inCluster, inInstanceSpec),
+		Command: startupCommand(ctx, inCluster, inInstanceSpec),
 		Env:     Environment(inCluster),
 
 		Image:           container.Image,
@@ -276,7 +265,7 @@ func InstancePod(ctx context.Context,
 
 	// If the InstanceSidecars feature gate is enabled and instance sidecars are
 	// defined, add the defined container to the Pod.
-	if util.DefaultMutableFeatureGate.Enabled(util.InstanceSidecars) &&
+	if feature.Enabled(ctx, feature.InstanceSidecars) &&
 		inInstanceSpec.Containers != nil {
 		outInstancePod.Containers = append(outInstancePod.Containers, inInstanceSpec.Containers...)
 	}
@@ -294,8 +283,7 @@ func PodSecurityContext(cluster *v1beta1.PostgresCluster) *corev1.PodSecurityCon
 	// - https://docs.k8s.io/concepts/security/pod-security-standards/
 	for i := range cluster.Spec.SupplementalGroups {
 		if gid := cluster.Spec.SupplementalGroups[i]; gid > 0 {
-			podSecurityContext.SupplementalGroups =
-				append(podSecurityContext.SupplementalGroups, gid)
+			podSecurityContext.SupplementalGroups = append(podSecurityContext.SupplementalGroups, gid)
 		}
 	}
 

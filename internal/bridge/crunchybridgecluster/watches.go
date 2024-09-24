@@ -1,16 +1,6 @@
-// Copyright 2021 - 2023 Crunchy Data Solutions, Inc.
+// Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package crunchybridgecluster
 
@@ -30,8 +20,7 @@ import (
 // watchForRelatedSecret handles create/update/delete events for secrets,
 // passing the Secret ObjectKey to findCrunchyBridgeClustersForSecret
 func (r *CrunchyBridgeClusterReconciler) watchForRelatedSecret() handler.EventHandler {
-	handle := func(secret client.Object, q workqueue.RateLimitingInterface) {
-		ctx := context.Background()
+	handle := func(ctx context.Context, secret client.Object, q workqueue.RateLimitingInterface) {
 		key := client.ObjectKeyFromObject(secret)
 
 		for _, cluster := range r.findCrunchyBridgeClustersForSecret(ctx, key) {
@@ -42,11 +31,11 @@ func (r *CrunchyBridgeClusterReconciler) watchForRelatedSecret() handler.EventHa
 	}
 
 	return handler.Funcs{
-		CreateFunc: func(e event.CreateEvent, q workqueue.RateLimitingInterface) {
-			handle(e.Object, q)
+		CreateFunc: func(ctx context.Context, e event.CreateEvent, q workqueue.RateLimitingInterface) {
+			handle(ctx, e.Object, q)
 		},
-		UpdateFunc: func(e event.UpdateEvent, q workqueue.RateLimitingInterface) {
-			handle(e.ObjectNew, q)
+		UpdateFunc: func(ctx context.Context, e event.UpdateEvent, q workqueue.RateLimitingInterface) {
+			handle(ctx, e.ObjectNew, q)
 		},
 		// If the secret is deleted, we want to reconcile
 		// in order to emit an event/status about this problem.
@@ -54,8 +43,8 @@ func (r *CrunchyBridgeClusterReconciler) watchForRelatedSecret() handler.EventHa
 		// when we reconcile the cluster and can't find the secret.
 		// That way, users will get two alerts: one when the secret is deleted
 		// and another when the cluster is being reconciled.
-		DeleteFunc: func(e event.DeleteEvent, q workqueue.RateLimitingInterface) {
-			handle(e.Object, q)
+		DeleteFunc: func(ctx context.Context, e event.DeleteEvent, q workqueue.RateLimitingInterface) {
+			handle(ctx, e.Object, q)
 		},
 	}
 }
@@ -90,8 +79,7 @@ func (r *CrunchyBridgeClusterReconciler) findCrunchyBridgeClustersForSecret(
 
 // Watch enqueues all existing CrunchyBridgeClusters for reconciles.
 func (r *CrunchyBridgeClusterReconciler) Watch() handler.EventHandler {
-	return handler.EnqueueRequestsFromMapFunc(func(client.Object) []reconcile.Request {
-		ctx := context.Background()
+	return handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, _ client.Object) []reconcile.Request {
 		log := ctrl.LoggerFrom(ctx)
 
 		crunchyBridgeClusterList := &v1beta1.CrunchyBridgeClusterList{}

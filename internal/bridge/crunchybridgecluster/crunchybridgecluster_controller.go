@@ -1,16 +1,6 @@
-// Copyright 2021 - 2023 Crunchy Data Solutions, Inc.
+// Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package crunchybridgecluster
 
@@ -25,15 +15,14 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
-	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	"github.com/crunchydata/postgres-operator/internal/bridge"
+	"github.com/crunchydata/postgres-operator/internal/controller/runtime"
 	pgoRuntime "github.com/crunchydata/postgres-operator/internal/controller/runtime"
 	"github.com/crunchydata/postgres-operator/internal/naming"
 	"github.com/crunchydata/postgres-operator/pkg/apis/postgres-operator.crunchydata.com/v1beta1"
@@ -43,8 +32,7 @@ import (
 type CrunchyBridgeClusterReconciler struct {
 	client.Client
 
-	Owner  client.FieldOwner
-	Scheme *runtime.Scheme
+	Owner client.FieldOwner
 
 	// For this iteration, we will only be setting conditions rather than
 	// setting conditions and emitting events. That may change in the future,
@@ -52,7 +40,7 @@ type CrunchyBridgeClusterReconciler struct {
 	// record.EventRecorder
 
 	// NewClient is called each time a new Client is needed.
-	NewClient func() *bridge.Client
+	NewClient func() bridge.ClientInterface
 }
 
 //+kubebuilder:rbac:groups="postgres-operator.crunchydata.com",resources="crunchybridgeclusters",verbs={list,watch}
@@ -68,13 +56,12 @@ func (r *CrunchyBridgeClusterReconciler) SetupWithManager(
 		// Wake periodically to check Bridge API for all CrunchyBridgeClusters.
 		// Potentially replace with different requeue times, remove the Watch function
 		// Smarter: retry after a certain time for each cluster: https://gist.github.com/cbandy/a5a604e3026630c5b08cfbcdfffd2a13
-		Watches(
-			pgoRuntime.NewTickerImmediate(5*time.Minute, event.GenericEvent{}),
-			r.Watch(),
+		WatchesRawSource(
+			pgoRuntime.NewTickerImmediate(5*time.Minute, event.GenericEvent{}, r.Watch()),
 		).
 		// Watch secrets and filter for secrets mentioned by CrunchyBridgeClusters
 		Watches(
-			&source.Kind{Type: &corev1.Secret{}},
+			&corev1.Secret{},
 			r.watchForRelatedSecret(),
 		).
 		Complete(r)
@@ -155,11 +142,6 @@ func (r *CrunchyBridgeClusterReconciler) Reconcile(ctx context.Context, req ctrl
 		return ctrl.Result{}, err
 	} else if result != nil {
 		if log := log.V(1); log.Enabled() {
-			if result.RequeueAfter > 0 {
-				// RequeueAfter implies Requeue, but set both to make the next
-				// log message more clear.
-				result.Requeue = true
-			}
 			log.Info("deleting", "result", fmt.Sprintf("%+v", *result))
 		}
 		return *result, err
@@ -192,104 +174,14 @@ func (r *CrunchyBridgeClusterReconciler) Reconcile(ctx context.Context, req ctrl
 	// We should only be missing the ID if no create has been issued
 	// or the create was interrupted and we haven't received the ID.
 	if crunchybridgecluster.Status.ID == "" {
-		// Check if the cluster exists
-		clusters, err := r.NewClient().ListClusters(ctx, key, team)
-		if err != nil {
-			meta.SetStatusCondition(&crunchybridgecluster.Status.Conditions, metav1.Condition{
-				ObservedGeneration: crunchybridgecluster.GetGeneration(),
-				Type:               v1beta1.ConditionReady,
-				Status:             metav1.ConditionUnknown,
-				Reason:             "UnknownClusterState",
-				Message:            fmt.Sprintf("Issue listing existing clusters in Bridge %v", err),
-			})
-			log.Error(err, "issue listing existing clusters in Bridge")
-			return ctrl.Result{}, err
-		}
-
-		for _, cluster := range clusters {
-			if crunchybridgecluster.Spec.ClusterName == cluster.ClusterName {
-				// Cluster with the same name exists so check for adoption annotation
-				adoptionID, annotationExists := crunchybridgecluster.Annotations[naming.CrunchyBridgeClusterAdoptionAnnotation]
-				if annotationExists && strings.EqualFold(adoptionID, cluster.ID) {
-					// Annotation is present with correct ID value; adopt cluster by assigning ID to status.
-					crunchybridgecluster.Status.ID = cluster.ID
-					// Requeue now that we have a cluster ID assigned
-					return ctrl.Result{Requeue: true}, nil
-				}
-
-				// If we made it here, the adoption annotation either doesn't exist or its value is incorrect.
-				// The user must either add it or change the name on the CR.
-
-				// Set invalid status condition and create log message.
-				meta.SetStatusCondition(&crunchybridgecluster.Status.Conditions, metav1.Condition{
-					ObservedGeneration: crunchybridgecluster.GetGeneration(),
-					Type:               v1beta1.ConditionReady,
-					Status:             metav1.ConditionFalse,
-					Reason:             "ClusterInvalid",
-					Message: fmt.Sprintf("A cluster with the same name already exists for this team (Team ID: %v). "+
-						"Give the CrunchyBridgeCluster CR a unique name, or if you would like to take control of the "+
-						"existing cluster, add the 'postgres-operator.crunchydata.com/adopt-bridge-cluster' "+
-						"annotation and set its value to the existing cluster's ID (Cluster ID: %v).", team, cluster.ID),
-				})
-
-				log.Info(fmt.Sprintf("A cluster with the same name already exists for this team (Team ID: %v). "+
-					"Give the CrunchyBridgeCluster CR a unique name, or if you would like to take control "+
-					"of the existing cluster, add the 'postgres-operator.crunchydata.com/adopt-bridge-cluster' "+
-					"annotation and set its value to the existing cluster's ID (Cluster ID: %v).", team, cluster.ID))
-
-				// We have an invalid cluster spec so we don't want to requeue
-				return ctrl.Result{}, nil
-			}
+		// Check if a cluster with the same name already exists
+		controllerResult, err := r.handleDuplicateClusterName(ctx, key, team, crunchybridgecluster)
+		if err != nil || controllerResult != nil {
+			return *controllerResult, err
 		}
 
 		// if we've gotten here then no cluster exists with that name and we're missing the ID, ergo, create cluster
-		createClusterRequestPayload := &bridge.PostClustersRequestPayload{
-			IsHA:            crunchybridgecluster.Spec.IsHA,
-			Name:            crunchybridgecluster.Spec.ClusterName,
-			Plan:            crunchybridgecluster.Spec.Plan,
-			PostgresVersion: intstr.FromInt(crunchybridgecluster.Spec.PostgresVersion),
-			Provider:        crunchybridgecluster.Spec.Provider,
-			Region:          crunchybridgecluster.Spec.Region,
-			Storage:         bridge.ToGibibytes(crunchybridgecluster.Spec.Storage),
-			Team:            team,
-		}
-		cluster, err := r.NewClient().CreateCluster(ctx, key, createClusterRequestPayload)
-		if err != nil {
-			log.Error(err, "issue creating cluster in Bridge")
-			// TODO(crunchybridgecluster): probably shouldn't set this condition unless response from Bridge
-			// indicates the payload is wrong
-			// Otherwise want a different condition
-			meta.SetStatusCondition(&crunchybridgecluster.Status.Conditions, metav1.Condition{
-				ObservedGeneration: crunchybridgecluster.GetGeneration(),
-				Type:               v1beta1.ConditionReady,
-				Status:             metav1.ConditionFalse,
-				Reason:             "ClusterInvalid",
-				Message: fmt.Sprintf(
-					"Cannot create from spec: %v", err),
-			})
-
-			// TODO(crunchybridgecluster): If the payload is wrong, we don't want to requeue, so pass nil error
-			// If the transmission hit a transient problem, we do want to requeue
-			return ctrl.Result{}, nil
-		}
-		crunchybridgecluster.Status.ID = cluster.ID
-
-		meta.SetStatusCondition(&crunchybridgecluster.Status.Conditions, metav1.Condition{
-			ObservedGeneration: crunchybridgecluster.GetGeneration(),
-			Type:               v1beta1.ConditionReady,
-			Status:             metav1.ConditionUnknown,
-			Reason:             "ReadyConditionUnknown",
-			Message:            "The condition of the cluster is unknown.",
-		})
-
-		meta.SetStatusCondition(&crunchybridgecluster.Status.Conditions, metav1.Condition{
-			ObservedGeneration: crunchybridgecluster.GetGeneration(),
-			Type:               v1beta1.ConditionUpgrading,
-			Status:             metav1.ConditionUnknown,
-			Reason:             "UpgradeConditionUnknown",
-			Message:            "The condition of the upgrade(s) is unknown.",
-		})
-		return ctrl.Result{RequeueAfter: 3 * time.Minute}, nil
+		return r.handleCreateCluster(ctx, key, team, crunchybridgecluster), nil
 	}
 
 	// If we reach this point, our CrunchyBridgeCluster object has an ID, so we want
@@ -297,77 +189,21 @@ func (r *CrunchyBridgeClusterReconciler) Reconcile(ctx context.Context, req ctrl
 	// from the Bridge API.
 
 	// Get Cluster
-	clusterDetails, err := r.NewClient().GetCluster(ctx, key, crunchybridgecluster.Status.ID)
+	err = r.handleGetCluster(ctx, key, crunchybridgecluster)
 	if err != nil {
-		meta.SetStatusCondition(&crunchybridgecluster.Status.Conditions, metav1.Condition{
-			ObservedGeneration: crunchybridgecluster.GetGeneration(),
-			Type:               v1beta1.ConditionReady,
-			Status:             metav1.ConditionUnknown,
-			Reason:             "UnknownClusterState",
-			Message:            fmt.Sprintf("Issue getting cluster information from Bridge: %v", err),
-		})
-		log.Error(err, "issue getting cluster information from Bridge")
 		return ctrl.Result{}, err
 	}
-	clusterDetails.AddDataToClusterStatus(crunchybridgecluster)
 
 	// Get Cluster Status
-	clusterStatus, err := r.NewClient().GetClusterStatus(ctx, key, crunchybridgecluster.Status.ID)
+	err = r.handleGetClusterStatus(ctx, key, crunchybridgecluster)
 	if err != nil {
-		meta.SetStatusCondition(&crunchybridgecluster.Status.Conditions, metav1.Condition{
-			ObservedGeneration: crunchybridgecluster.GetGeneration(),
-			Type:               v1beta1.ConditionReady,
-			Status:             metav1.ConditionUnknown,
-			Reason:             "UnknownClusterState",
-			Message:            fmt.Sprintf("Issue getting cluster status from Bridge: %v", err),
-		})
-		log.Error(err, "issue getting cluster status from Bridge")
 		return ctrl.Result{}, err
-	}
-	clusterStatus.AddDataToClusterStatus(crunchybridgecluster)
-	if clusterStatus.State == "ready" {
-		meta.SetStatusCondition(&crunchybridgecluster.Status.Conditions, metav1.Condition{
-			ObservedGeneration: crunchybridgecluster.GetGeneration(),
-			Type:               v1beta1.ConditionReady,
-			Status:             metav1.ConditionTrue,
-			Reason:             clusterStatus.State,
-			Message:            fmt.Sprintf("Bridge cluster state is %v.", clusterStatus.State),
-		})
-	} else {
-		meta.SetStatusCondition(&crunchybridgecluster.Status.Conditions, metav1.Condition{
-			ObservedGeneration: crunchybridgecluster.GetGeneration(),
-			Type:               v1beta1.ConditionReady,
-			Status:             metav1.ConditionFalse,
-			Reason:             clusterStatus.State,
-			Message:            fmt.Sprintf("Bridge cluster state is %v.", clusterStatus.State),
-		})
 	}
 
 	// Get Cluster Upgrade
-	clusterUpgradeDetails, err := r.NewClient().GetClusterUpgrade(ctx, key, crunchybridgecluster.Status.ID)
+	err = r.handleGetClusterUpgrade(ctx, key, crunchybridgecluster)
 	if err != nil {
-		log.Error(err, "issue getting cluster upgrade from Bridge")
 		return ctrl.Result{}, err
-	}
-	clusterUpgradeDetails.AddDataToClusterStatus(crunchybridgecluster)
-	if len(clusterUpgradeDetails.Operations) != 0 {
-		meta.SetStatusCondition(&crunchybridgecluster.Status.Conditions, metav1.Condition{
-			ObservedGeneration: crunchybridgecluster.GetGeneration(),
-			Type:               v1beta1.ConditionUpgrading,
-			Status:             metav1.ConditionTrue,
-			Reason:             clusterUpgradeDetails.Operations[0].Flavor,
-			Message: fmt.Sprintf(
-				"Performing an upgrade of type %v with a state of %v.",
-				clusterUpgradeDetails.Operations[0].Flavor, clusterUpgradeDetails.Operations[0].State),
-		})
-	} else {
-		meta.SetStatusCondition(&crunchybridgecluster.Status.Conditions, metav1.Condition{
-			ObservedGeneration: crunchybridgecluster.GetGeneration(),
-			Type:               v1beta1.ConditionUpgrading,
-			Status:             metav1.ConditionFalse,
-			Reason:             "NoUpgradesInProgress",
-			Message:            "No upgrades being performed",
-		})
 	}
 
 	// Reconcile roles and their secrets
@@ -387,7 +223,7 @@ func (r *CrunchyBridgeClusterReconciler) Reconcile(ctx context.Context, req ctrl
 	// TODO(crunchybridgecluster): Do we want the operator to interrupt
 	// upgrades created through the GUI/API?
 	if len(crunchybridgecluster.Status.OngoingUpgrade) != 0 {
-		return ctrl.Result{RequeueAfter: 3 * time.Minute}, nil
+		return runtime.RequeueWithoutBackoff(3 * time.Minute), nil
 	}
 
 	// Check if there's an upgrade difference for the three upgradeable fields that hit the upgrade endpoint
@@ -396,27 +232,33 @@ func (r *CrunchyBridgeClusterReconciler) Reconcile(ctx context.Context, req ctrl
 	if (crunchybridgecluster.Spec.Storage != *crunchybridgecluster.Status.Storage) ||
 		crunchybridgecluster.Spec.Plan != crunchybridgecluster.Status.Plan ||
 		crunchybridgecluster.Spec.PostgresVersion != crunchybridgecluster.Status.MajorVersion {
-		return r.handleUpgrade(ctx, key, crunchybridgecluster)
+		return r.handleUpgrade(ctx, key, crunchybridgecluster), nil
 	}
 
 	// Are there diffs between the cluster response from the Bridge API and the spec?
 	// HA diffs are sent to /clusters/{cluster_id}/actions/[enable|disable]-ha
 	// so have to know (a) to send and (b) which to send to
 	if crunchybridgecluster.Spec.IsHA != *crunchybridgecluster.Status.IsHA {
-		return r.handleUpgradeHA(ctx, key, crunchybridgecluster)
+		return r.handleUpgradeHA(ctx, key, crunchybridgecluster), nil
 	}
 
 	// Check if there's a difference in is_protected, name, maintenance_window_start, etc.
 	// see https://docs.crunchybridge.com/api/cluster#update-cluster
 	// updates to these fields that hit the PATCH `clusters/<id>` endpoint
-	// TODO(crunchybridgecluster)
+	if crunchybridgecluster.Spec.IsProtected != *crunchybridgecluster.Status.IsProtected ||
+		crunchybridgecluster.Spec.ClusterName != crunchybridgecluster.Status.ClusterName {
+		return r.handleUpdate(ctx, key, crunchybridgecluster), nil
+	}
 
 	log.Info("Reconciled")
 	// TODO(crunchybridgecluster): do we always want to requeue? Does the Watch mean we
 	// don't need this, or do we want both?
-	return ctrl.Result{RequeueAfter: 3 * time.Minute}, nil
+	return runtime.RequeueWithoutBackoff(3 * time.Minute), nil
 }
 
+// reconcileBridgeConnectionSecret looks for the Bridge connection secret specified by the cluster,
+// and returns the API key and Team ID found in the secret, or sets conditions and returns an error
+// if the secret is invalid.
 func (r *CrunchyBridgeClusterReconciler) reconcileBridgeConnectionSecret(
 	ctx context.Context, crunchybridgecluster *v1beta1.CrunchyBridgeCluster,
 ) (string, string, error) {
@@ -446,11 +288,241 @@ func (r *CrunchyBridgeClusterReconciler) reconcileBridgeConnectionSecret(
 	return key, team, err
 }
 
+// handleDuplicateClusterName checks Bridge for any already existing clusters that
+// have the same name. It returns (nil, nil) when no cluster is found with the same
+// name. It returns a controller result, indicating we should exit the reconcile loop,
+// if a cluster with a duplicate name is found. The caller is responsible for
+// returning controller result objects and errors to controller-runtime.
+func (r *CrunchyBridgeClusterReconciler) handleDuplicateClusterName(ctx context.Context,
+	apiKey, teamId string, crunchybridgecluster *v1beta1.CrunchyBridgeCluster,
+) (*ctrl.Result, error) {
+	log := ctrl.LoggerFrom(ctx)
+
+	clusters, err := r.NewClient().ListClusters(ctx, apiKey, teamId)
+	if err != nil {
+		meta.SetStatusCondition(&crunchybridgecluster.Status.Conditions, metav1.Condition{
+			ObservedGeneration: crunchybridgecluster.GetGeneration(),
+			Type:               v1beta1.ConditionReady,
+			Status:             metav1.ConditionUnknown,
+			Reason:             "UnknownClusterState",
+			Message:            fmt.Sprintf("Issue listing existing clusters in Bridge: %v", err),
+		})
+		log.Error(err, "issue listing existing clusters in Bridge")
+		return &ctrl.Result{}, err
+	}
+
+	for _, cluster := range clusters {
+		if crunchybridgecluster.Spec.ClusterName == cluster.ClusterName {
+			// Cluster with the same name exists so check for adoption annotation
+			adoptionID, annotationExists := crunchybridgecluster.Annotations[naming.CrunchyBridgeClusterAdoptionAnnotation]
+			if annotationExists && strings.EqualFold(adoptionID, cluster.ID) {
+				// Annotation is present with correct ID value; adopt cluster by assigning ID to status.
+				crunchybridgecluster.Status.ID = cluster.ID
+				// Requeue now that we have a cluster ID assigned
+				return &ctrl.Result{Requeue: true}, nil
+			}
+
+			// If we made it here, the adoption annotation either doesn't exist or its value is incorrect.
+			// The user must either add it or change the name on the CR.
+
+			// Set invalid status condition and create log message.
+			meta.SetStatusCondition(&crunchybridgecluster.Status.Conditions, metav1.Condition{
+				ObservedGeneration: crunchybridgecluster.GetGeneration(),
+				Type:               v1beta1.ConditionReady,
+				Status:             metav1.ConditionFalse,
+				Reason:             "DuplicateClusterName",
+				Message: fmt.Sprintf("A cluster with the same name already exists for this team (Team ID: %v). "+
+					"Give the CrunchyBridgeCluster CR a unique name, or if you would like to take control of the "+
+					"existing cluster, add the 'postgres-operator.crunchydata.com/adopt-bridge-cluster' "+
+					"annotation and set its value to the existing cluster's ID (Cluster ID: %v).", teamId, cluster.ID),
+			})
+
+			log.Info(fmt.Sprintf("A cluster with the same name already exists for this team (Team ID: %v). "+
+				"Give the CrunchyBridgeCluster CR a unique name, or if you would like to take control "+
+				"of the existing cluster, add the 'postgres-operator.crunchydata.com/adopt-bridge-cluster' "+
+				"annotation and set its value to the existing cluster's ID (Cluster ID: %v).", teamId, cluster.ID))
+
+			// We have an invalid cluster spec so we don't want to requeue
+			return &ctrl.Result{}, nil
+		}
+	}
+
+	return nil, nil
+}
+
+// handleCreateCluster handles creating new Crunchy Bridge Clusters
+func (r *CrunchyBridgeClusterReconciler) handleCreateCluster(ctx context.Context,
+	apiKey, teamId string, crunchybridgecluster *v1beta1.CrunchyBridgeCluster,
+) ctrl.Result {
+	log := ctrl.LoggerFrom(ctx)
+
+	createClusterRequestPayload := &bridge.PostClustersRequestPayload{
+		IsHA:            crunchybridgecluster.Spec.IsHA,
+		Name:            crunchybridgecluster.Spec.ClusterName,
+		Plan:            crunchybridgecluster.Spec.Plan,
+		PostgresVersion: intstr.FromInt(crunchybridgecluster.Spec.PostgresVersion),
+		Provider:        crunchybridgecluster.Spec.Provider,
+		Region:          crunchybridgecluster.Spec.Region,
+		Storage:         bridge.ToGibibytes(crunchybridgecluster.Spec.Storage),
+		Team:            teamId,
+	}
+	cluster, err := r.NewClient().CreateCluster(ctx, apiKey, createClusterRequestPayload)
+	if err != nil {
+		log.Error(err, "issue creating cluster in Bridge")
+		// TODO(crunchybridgecluster): probably shouldn't set this condition unless response from Bridge
+		// indicates the payload is wrong
+		// Otherwise want a different condition
+		meta.SetStatusCondition(&crunchybridgecluster.Status.Conditions, metav1.Condition{
+			ObservedGeneration: crunchybridgecluster.GetGeneration(),
+			Type:               v1beta1.ConditionReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             "ClusterInvalid",
+			Message: fmt.Sprintf(
+				"Cannot create from spec: %v", err),
+		})
+
+		// TODO(crunchybridgecluster): If the payload is wrong, we don't want to requeue, so pass nil error
+		// If the transmission hit a transient problem, we do want to requeue
+		return ctrl.Result{}
+	}
+	crunchybridgecluster.Status.ID = cluster.ID
+
+	meta.SetStatusCondition(&crunchybridgecluster.Status.Conditions, metav1.Condition{
+		ObservedGeneration: crunchybridgecluster.GetGeneration(),
+		Type:               v1beta1.ConditionReady,
+		Status:             metav1.ConditionUnknown,
+		Reason:             "UnknownClusterState",
+		Message:            "The condition of the cluster is unknown.",
+	})
+
+	meta.SetStatusCondition(&crunchybridgecluster.Status.Conditions, metav1.Condition{
+		ObservedGeneration: crunchybridgecluster.GetGeneration(),
+		Type:               v1beta1.ConditionUpgrading,
+		Status:             metav1.ConditionUnknown,
+		Reason:             "UnknownUpgradeState",
+		Message:            "The condition of the upgrade(s) is unknown.",
+	})
+
+	return runtime.RequeueWithoutBackoff(3 * time.Minute)
+}
+
+// handleGetCluster handles getting the cluster details from Bridge and
+// updating the cluster CR's Status accordingly
+func (r *CrunchyBridgeClusterReconciler) handleGetCluster(ctx context.Context,
+	apiKey string, crunchybridgecluster *v1beta1.CrunchyBridgeCluster,
+) error {
+	log := ctrl.LoggerFrom(ctx)
+
+	clusterDetails, err := r.NewClient().GetCluster(ctx, apiKey, crunchybridgecluster.Status.ID)
+	if err != nil {
+		meta.SetStatusCondition(&crunchybridgecluster.Status.Conditions, metav1.Condition{
+			ObservedGeneration: crunchybridgecluster.GetGeneration(),
+			Type:               v1beta1.ConditionReady,
+			Status:             metav1.ConditionUnknown,
+			Reason:             "UnknownClusterState",
+			Message:            fmt.Sprintf("Issue getting cluster information from Bridge: %v", err),
+		})
+		log.Error(err, "issue getting cluster information from Bridge")
+		return err
+	}
+	clusterDetails.AddDataToClusterStatus(crunchybridgecluster)
+
+	return nil
+}
+
+// handleGetClusterStatus handles getting the cluster status from Bridge and
+// updating the cluster CR's Status accordingly
+func (r *CrunchyBridgeClusterReconciler) handleGetClusterStatus(ctx context.Context,
+	apiKey string, crunchybridgecluster *v1beta1.CrunchyBridgeCluster,
+) error {
+	log := ctrl.LoggerFrom(ctx)
+
+	clusterStatus, err := r.NewClient().GetClusterStatus(ctx, apiKey, crunchybridgecluster.Status.ID)
+	if err != nil {
+		meta.SetStatusCondition(&crunchybridgecluster.Status.Conditions, metav1.Condition{
+			ObservedGeneration: crunchybridgecluster.GetGeneration(),
+			Type:               v1beta1.ConditionReady,
+			Status:             metav1.ConditionUnknown,
+			Reason:             "UnknownClusterState",
+			Message:            fmt.Sprintf("Issue getting cluster status from Bridge: %v", err),
+		})
+		crunchybridgecluster.Status.State = "unknown"
+		log.Error(err, "issue getting cluster status from Bridge")
+		return err
+	}
+	clusterStatus.AddDataToClusterStatus(crunchybridgecluster)
+
+	if clusterStatus.State == "ready" {
+		meta.SetStatusCondition(&crunchybridgecluster.Status.Conditions, metav1.Condition{
+			ObservedGeneration: crunchybridgecluster.GetGeneration(),
+			Type:               v1beta1.ConditionReady,
+			Status:             metav1.ConditionTrue,
+			Reason:             clusterStatus.State,
+			Message:            fmt.Sprintf("Bridge cluster state is %v.", clusterStatus.State),
+		})
+	} else {
+		meta.SetStatusCondition(&crunchybridgecluster.Status.Conditions, metav1.Condition{
+			ObservedGeneration: crunchybridgecluster.GetGeneration(),
+			Type:               v1beta1.ConditionReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             clusterStatus.State,
+			Message:            fmt.Sprintf("Bridge cluster state is %v.", clusterStatus.State),
+		})
+	}
+
+	return nil
+}
+
+// handleGetClusterUpgrade handles getting the ongoing upgrade operations from Bridge and
+// updating the cluster CR's Status accordingly
+func (r *CrunchyBridgeClusterReconciler) handleGetClusterUpgrade(ctx context.Context,
+	apiKey string,
+	crunchybridgecluster *v1beta1.CrunchyBridgeCluster,
+) error {
+	log := ctrl.LoggerFrom(ctx)
+
+	clusterUpgradeDetails, err := r.NewClient().GetClusterUpgrade(ctx, apiKey, crunchybridgecluster.Status.ID)
+	if err != nil {
+		meta.SetStatusCondition(&crunchybridgecluster.Status.Conditions, metav1.Condition{
+			ObservedGeneration: crunchybridgecluster.GetGeneration(),
+			Type:               v1beta1.ConditionUpgrading,
+			Status:             metav1.ConditionUnknown,
+			Reason:             "UnknownUpgradeState",
+			Message:            fmt.Sprintf("Issue getting cluster upgrade from Bridge: %v", err),
+		})
+		log.Error(err, "issue getting cluster upgrade from Bridge")
+		return err
+	}
+	clusterUpgradeDetails.AddDataToClusterStatus(crunchybridgecluster)
+
+	if len(clusterUpgradeDetails.Operations) != 0 {
+		meta.SetStatusCondition(&crunchybridgecluster.Status.Conditions, metav1.Condition{
+			ObservedGeneration: crunchybridgecluster.GetGeneration(),
+			Type:               v1beta1.ConditionUpgrading,
+			Status:             metav1.ConditionTrue,
+			Reason:             clusterUpgradeDetails.Operations[0].Flavor,
+			Message: fmt.Sprintf(
+				"Performing an upgrade of type %v with a state of %v.",
+				clusterUpgradeDetails.Operations[0].Flavor, clusterUpgradeDetails.Operations[0].State),
+		})
+	} else {
+		meta.SetStatusCondition(&crunchybridgecluster.Status.Conditions, metav1.Condition{
+			ObservedGeneration: crunchybridgecluster.GetGeneration(),
+			Type:               v1beta1.ConditionUpgrading,
+			Status:             metav1.ConditionFalse,
+			Reason:             "NoUpgradesInProgress",
+			Message:            "No upgrades being performed",
+		})
+	}
+
+	return nil
+}
+
 // handleUpgrade handles upgrades that hit the "POST /clusters/<id>/upgrade" endpoint
 func (r *CrunchyBridgeClusterReconciler) handleUpgrade(ctx context.Context,
 	apiKey string,
 	crunchybridgecluster *v1beta1.CrunchyBridgeCluster,
-) (ctrl.Result, error) {
+) ctrl.Result {
 	log := ctrl.LoggerFrom(ctx)
 
 	log.Info("Handling upgrade request")
@@ -476,7 +548,7 @@ func (r *CrunchyBridgeClusterReconciler) handleUpgrade(ctx context.Context,
 				"Error performing an upgrade: %s", err),
 		})
 		log.Error(err, "Error while attempting cluster upgrade")
-		return ctrl.Result{}, nil
+		return ctrl.Result{}
 	}
 	clusterUpgrade.AddDataToClusterStatus(crunchybridgecluster)
 
@@ -491,7 +563,8 @@ func (r *CrunchyBridgeClusterReconciler) handleUpgrade(ctx context.Context,
 				clusterUpgrade.Operations[0].Flavor, clusterUpgrade.Operations[0].State),
 		})
 	}
-	return ctrl.Result{RequeueAfter: 3 * time.Minute}, nil
+
+	return runtime.RequeueWithoutBackoff(3 * time.Minute)
 }
 
 // handleUpgradeHA handles upgrades that hit the
@@ -499,7 +572,7 @@ func (r *CrunchyBridgeClusterReconciler) handleUpgrade(ctx context.Context,
 func (r *CrunchyBridgeClusterReconciler) handleUpgradeHA(ctx context.Context,
 	apiKey string,
 	crunchybridgecluster *v1beta1.CrunchyBridgeCluster,
-) (ctrl.Result, error) {
+) ctrl.Result {
 	log := ctrl.LoggerFrom(ctx)
 
 	log.Info("Handling HA change request")
@@ -523,7 +596,7 @@ func (r *CrunchyBridgeClusterReconciler) handleUpgradeHA(ctx context.Context,
 				"Error performing an HA upgrade: %s", err),
 		})
 		log.Error(err, "Error while attempting cluster HA change")
-		return ctrl.Result{}, nil
+		return ctrl.Result{}
 	}
 	clusterUpgrade.AddDataToClusterStatus(crunchybridgecluster)
 	if len(clusterUpgrade.Operations) != 0 {
@@ -533,11 +606,57 @@ func (r *CrunchyBridgeClusterReconciler) handleUpgradeHA(ctx context.Context,
 			Status:             metav1.ConditionTrue,
 			Reason:             clusterUpgrade.Operations[0].Flavor,
 			Message: fmt.Sprintf(
-				"Perfoming an upgrade of type %v with a state of %v.",
+				"Performing an upgrade of type %v with a state of %v.",
 				clusterUpgrade.Operations[0].Flavor, clusterUpgrade.Operations[0].State),
 		})
 	}
-	return ctrl.Result{RequeueAfter: 3 * time.Minute}, nil
+
+	return runtime.RequeueWithoutBackoff(3 * time.Minute)
+}
+
+// handleUpdate handles upgrades that hit the "PATCH /clusters/<id>" endpoint
+func (r *CrunchyBridgeClusterReconciler) handleUpdate(ctx context.Context,
+	apiKey string,
+	crunchybridgecluster *v1beta1.CrunchyBridgeCluster,
+) ctrl.Result {
+	log := ctrl.LoggerFrom(ctx)
+
+	log.Info("Handling update request")
+
+	updateRequest := &bridge.PatchClustersRequestPayload{
+		IsProtected: &crunchybridgecluster.Spec.IsProtected,
+		Name:        crunchybridgecluster.Spec.ClusterName,
+	}
+
+	clusterUpdate, err := r.NewClient().UpdateCluster(ctx, apiKey,
+		crunchybridgecluster.Status.ID, updateRequest)
+	if err != nil {
+		// TODO(crunchybridgecluster): consider what errors we might get
+		// and what different results/requeue times we want to return.
+		// Currently: don't requeue and wait for user to change spec.
+		meta.SetStatusCondition(&crunchybridgecluster.Status.Conditions, metav1.Condition{
+			ObservedGeneration: crunchybridgecluster.GetGeneration(),
+			Type:               v1beta1.ConditionUpgrading,
+			Status:             metav1.ConditionFalse,
+			Reason:             "UpgradeError",
+			Message: fmt.Sprintf(
+				"Error performing an upgrade: %s", err),
+		})
+		log.Error(err, "Error while attempting cluster update")
+		return ctrl.Result{}
+	}
+	clusterUpdate.AddDataToClusterStatus(crunchybridgecluster)
+	meta.SetStatusCondition(&crunchybridgecluster.Status.Conditions, metav1.Condition{
+		ObservedGeneration: crunchybridgecluster.GetGeneration(),
+		Type:               v1beta1.ConditionUpgrading,
+		Status:             metav1.ConditionTrue,
+		Reason:             "ClusterUpgrade",
+		Message: fmt.Sprintf(
+			"An upgrade is occurring, the clusters name is %v and the cluster is protected is %v.",
+			clusterUpdate.ClusterName, *clusterUpdate.IsProtected),
+	})
+
+	return runtime.RequeueWithoutBackoff(3 * time.Minute)
 }
 
 // GetSecretKeys gets the secret and returns the expected API key and team id

@@ -1,17 +1,6 @@
-/*
- Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
- http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+// Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
 
 package pgadmin
 
@@ -42,8 +31,6 @@ export PATH=$PATH:/usr/pgsql-*/bin
 RED="\033[0;31m"
 GREEN="\033[0;32m"
 RESET="\033[0m"
-
-CRUNCHY_DIR=${CRUNCHY_DIR:-'/opt/crunchy'}
 
 function enable_debugging() {
     if [[ ${CRUNCHY_DEBUG:-false} == "true" ]]
@@ -129,8 +116,6 @@ then
     python3 setup.py > /tmp/pgadmin4.stdout 2> /tmp/pgadmin4.stderr
     err_check "$?" "pgAdmin4 Database Setup" "Could not create pgAdmin4 database: \n$(cat /tmp/pgadmin4.stderr)"
 fi
-
-cd ${PGADMIN_DIR?}
 
 echo_info "Starting Apache web server.."
 /usr/sbin/httpd -D FOREGROUND &

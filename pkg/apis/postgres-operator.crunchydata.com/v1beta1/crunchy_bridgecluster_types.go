@@ -1,17 +1,6 @@
-/*
- Copyright 2021 - 2023 Crunchy Data Solutions, Inc.
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
- http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+// Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
 
 package v1beta1
 
@@ -32,6 +21,11 @@ type CrunchyBridgeClusterSpec struct {
 	// +kubebuilder:validation:Required
 	IsHA bool `json:"isHa"`
 
+	// Whether the cluster is protected. Protected clusters can't be destroyed until
+	// their protected flag is removed
+	// +optional
+	IsProtected bool `json:"isProtected,omitempty"`
+
 	// The name of the cluster
 	// ---
 	// According to Bridge API/GUI errors,
@@ -48,10 +42,10 @@ type CrunchyBridgeClusterSpec struct {
 	Plan string `json:"plan"`
 
 	// The ID of the cluster's major Postgres version.
-	// Currently Bridge offers 13-16
+	// Currently Bridge offers 13-17
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Minimum=13
-	// +kubebuilder:validation:Maximum=16
+	// +kubebuilder:validation:Maximum=17
 	// +operator-sdk:csv:customresourcedefinitions:type=spec,order=1
 	PostgresVersion int `json:"majorVersion"`
 
@@ -59,10 +53,12 @@ type CrunchyBridgeClusterSpec struct {
 	// Currently Bridge offers aws, azure, and gcp only
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Enum={aws,azure,gcp}
+	// +kubebuilder:validation:XValidation:rule=`self == oldSelf`,message="immutable"
 	Provider string `json:"provider"`
 
 	// The provider region where the cluster is located.
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:XValidation:rule=`self == oldSelf`,message="immutable"
 	Region string `json:"region"`
 
 	// Roles for which to create Secrets that contain their credentials which
@@ -193,7 +189,6 @@ const (
 // +operator-sdk:csv:customresourcedefinitions:resources={{ConfigMap,v1},{Secret,v1},{Service,v1},{CronJob,v1beta1},{Deployment,v1},{Job,v1},{StatefulSet,v1},{PersistentVolumeClaim,v1}}
 
 // CrunchyBridgeCluster is the Schema for the crunchybridgeclusters API
-// This Custom Resource requires enabling CrunchyBridgeClusters feature gate
 type CrunchyBridgeCluster struct {
 	// ObjectMeta.Name is a DNS subdomain.
 	// - https://docs.k8s.io/concepts/overview/working-with-objects/names/#dns-subdomain-names

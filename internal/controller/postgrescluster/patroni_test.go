@@ -1,22 +1,8 @@
-//go:build envtest
-// +build envtest
+// Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
 
 package postgrescluster
-
-/*
- Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
- http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
 
 import (
 	"context"
@@ -37,10 +23,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/crunchydata/postgres-operator/internal/initialize"
 	"github.com/crunchydata/postgres-operator/internal/naming"
+	"github.com/crunchydata/postgres-operator/internal/testing/cmp"
 	"github.com/crunchydata/postgres-operator/internal/testing/require"
 	"github.com/crunchydata/postgres-operator/pkg/apis/postgres-operator.crunchydata.com/v1beta1"
 )
@@ -60,11 +46,11 @@ func TestGeneratePatroniLeaderLeaseService(t *testing.T) {
 	cluster.Spec.Port = initialize.Int32(9876)
 
 	alwaysExpect := func(t testing.TB, service *corev1.Service) {
-		assert.Assert(t, marshalMatches(service.TypeMeta, `
+		assert.Assert(t, cmp.MarshalMatches(service.TypeMeta, `
 apiVersion: v1
 kind: Service
 		`))
-		assert.Assert(t, marshalMatches(service.ObjectMeta, `
+		assert.Assert(t, cmp.MarshalMatches(service.ObjectMeta, `
 creationTimestamp: null
 labels:
   postgres-operator.crunchydata.com/cluster: pg2
@@ -92,7 +78,7 @@ ownerReferences:
 		alwaysExpect(t, service)
 		// Defaults to ClusterIP.
 		assert.Equal(t, service.Spec.Type, corev1.ServiceTypeClusterIP)
-		assert.Assert(t, marshalMatches(service.Spec.Ports, `
+		assert.Assert(t, cmp.MarshalMatches(service.Spec.Ports, `
 - name: postgres
   port: 9876
   protocol: TCP
@@ -181,7 +167,7 @@ ownerReferences:
 			assert.NilError(t, err)
 			alwaysExpect(t, service)
 			test.Expect(t, service)
-			assert.Assert(t, marshalMatches(service.Spec.Ports, `
+			assert.Assert(t, cmp.MarshalMatches(service.Spec.Ports, `
 - name: postgres
   port: 9876
   protocol: TCP
@@ -206,7 +192,7 @@ ownerReferences:
 				assert.NilError(t, err)
 				alwaysExpect(t, service)
 				assert.Equal(t, service.Spec.Type, corev1.ServiceTypeNodePort)
-				assert.Assert(t, marshalMatches(service.Spec.Ports, `
+				assert.Assert(t, cmp.MarshalMatches(service.Spec.Ports, `
 - name: postgres
   nodePort: 32001
   port: 9876
@@ -219,7 +205,7 @@ ownerReferences:
 				assert.Equal(t, service.Spec.Type, corev1.ServiceTypeLoadBalancer)
 				assert.NilError(t, err)
 				alwaysExpect(t, service)
-				assert.Assert(t, marshalMatches(service.Spec.Ports, `
+				assert.Assert(t, cmp.MarshalMatches(service.Spec.Ports, `
 - name: postgres
   nodePort: 32002
   port: 9876
@@ -527,13 +513,13 @@ func TestReconcilePatroniStatus(t *testing.T) {
 		t.Run(fmt.Sprintf("%+v", tc), func(t *testing.T) {
 			postgresCluster, observedInstances := createResources(i, tc.readyReplicas,
 				tc.writeAnnotation)
-			result, err := r.reconcilePatroniStatus(ctx, postgresCluster, observedInstances)
+			requeue, err := r.reconcilePatroniStatus(ctx, postgresCluster, observedInstances)
 			if tc.requeueExpected {
 				assert.NilError(t, err)
-				assert.Assert(t, result.RequeueAfter == 1*time.Second)
+				assert.Equal(t, requeue, time.Second)
 			} else {
 				assert.NilError(t, err)
-				assert.DeepEqual(t, result, reconcile.Result{})
+				assert.Equal(t, requeue, time.Duration(0))
 			}
 		})
 	}
@@ -547,7 +533,7 @@ func TestReconcilePatroniSwitchover(t *testing.T) {
 	var timelineCallNoLeader, timelineCall bool
 	r := Reconciler{
 		Client: client,
-		PodExec: func(namespace, pod, container string,
+		PodExec: func(ctx context.Context, namespace, pod, container string,
 			stdin io.Reader, stdout, stderr io.Writer, command ...string) error {
 			called = true
 			switch {

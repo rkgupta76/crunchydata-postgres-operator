@@ -1,17 +1,6 @@
-/*
- Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
- http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+// Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
 
 package postgres
 
@@ -19,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -27,6 +17,24 @@ import (
 	"github.com/crunchydata/postgres-operator/internal/testing/cmp"
 	"github.com/crunchydata/postgres-operator/pkg/apis/postgres-operator.crunchydata.com/v1beta1"
 )
+
+func TestSanitizeAlterRoleOptions(t *testing.T) {
+	assert.Equal(t, sanitizeAlterRoleOptions(""), "")
+	assert.Equal(t, sanitizeAlterRoleOptions(" login  other stuff"), "",
+		"expected non-options to be removed")
+
+	t.Run("RemovesPassword", func(t *testing.T) {
+		assert.Equal(t, sanitizeAlterRoleOptions("password 'anything'"), "")
+		assert.Equal(t, sanitizeAlterRoleOptions("password $wild$ dollar quoting $wild$ login"), "LOGIN")
+		assert.Equal(t, sanitizeAlterRoleOptions(" login password '' replication "), "LOGIN REPLICATION")
+	})
+
+	t.Run("RemovesComments", func(t *testing.T) {
+		assert.Equal(t, sanitizeAlterRoleOptions("login -- asdf"), "LOGIN")
+		assert.Equal(t, sanitizeAlterRoleOptions("login /*"), "")
+		assert.Equal(t, sanitizeAlterRoleOptions("login /* createdb */ createrole"), "LOGIN CREATEROLE")
+	})
+}
 
 func TestWriteUsersInPostgreSQL(t *testing.T) {
 	ctx := context.Background()
@@ -41,7 +49,8 @@ func TestWriteUsersInPostgreSQL(t *testing.T) {
 			return expected
 		}
 
-		assert.Equal(t, expected, WriteUsersInPostgreSQL(ctx, exec, nil, nil))
+		cluster := new(v1beta1.PostgresCluster)
+		assert.Equal(t, expected, WriteUsersInPostgreSQL(ctx, cluster, exec, nil, nil))
 	})
 
 	t.Run("Empty", func(t *testing.T) {
@@ -86,17 +95,19 @@ COMMIT;`))
 			return nil
 		}
 
-		assert.NilError(t, WriteUsersInPostgreSQL(ctx, exec, nil, nil))
+		cluster := new(v1beta1.PostgresCluster)
+		assert.NilError(t, WriteUsersInPostgreSQL(ctx, cluster, exec, nil, nil))
 		assert.Equal(t, calls, 1)
 
-		assert.NilError(t, WriteUsersInPostgreSQL(ctx, exec, []v1beta1.PostgresUserSpec{}, nil))
+		assert.NilError(t, WriteUsersInPostgreSQL(ctx, cluster, exec, []v1beta1.PostgresUserSpec{}, nil))
 		assert.Equal(t, calls, 2)
 
-		assert.NilError(t, WriteUsersInPostgreSQL(ctx, exec, nil, map[string]string{}))
+		assert.NilError(t, WriteUsersInPostgreSQL(ctx, cluster, exec, nil, map[string]string{}))
 		assert.Equal(t, calls, 3)
 	})
 
 	t.Run("OptionalFields", func(t *testing.T) {
+		cluster := new(v1beta1.PostgresCluster)
 		calls := 0
 		exec := func(
 			_ context.Context, stdin io.Reader, _, _ io.Writer, command ...string,
@@ -108,14 +119,15 @@ COMMIT;`))
 			assert.Assert(t, cmp.Contains(string(b), `
 \copy input (data) from stdin with (format text)
 {"databases":["db1"],"options":"","username":"user-no-options","verifier":""}
-{"databases":null,"options":"some options here","username":"user-no-databases","verifier":""}
+{"databases":null,"options":"CREATEDB CREATEROLE","username":"user-no-databases","verifier":""}
 {"databases":null,"options":"","username":"user-with-verifier","verifier":"some$verifier"}
+{"databases":null,"options":"LOGIN","username":"user-invalid-options","verifier":""}
 \.
 `))
 			return nil
 		}
 
-		assert.NilError(t, WriteUsersInPostgreSQL(ctx, exec,
+		assert.NilError(t, WriteUsersInPostgreSQL(ctx, cluster, exec,
 			[]v1beta1.PostgresUserSpec{
 				{
 					Name:      "user-no-options",
@@ -123,10 +135,14 @@ COMMIT;`))
 				},
 				{
 					Name:    "user-no-databases",
-					Options: "some options here",
+					Options: "createdb createrole",
 				},
 				{
 					Name: "user-with-verifier",
+				},
+				{
+					Name:    "user-invalid-options",
+					Options: "login password 'doot' --",
 				},
 			},
 			map[string]string{
@@ -139,6 +155,7 @@ COMMIT;`))
 
 	t.Run("PostgresSuperuser", func(t *testing.T) {
 		calls := 0
+		cluster := new(v1beta1.PostgresCluster)
 		exec := func(
 			_ context.Context, stdin io.Reader, _, _ io.Writer, command ...string,
 		) error {
@@ -154,7 +171,7 @@ COMMIT;`))
 			return nil
 		}
 
-		assert.NilError(t, WriteUsersInPostgreSQL(ctx, exec,
+		assert.NilError(t, WriteUsersInPostgreSQL(ctx, cluster, exec,
 			[]v1beta1.PostgresUserSpec{
 				{
 					Name:      "postgres",
@@ -168,4 +185,53 @@ COMMIT;`))
 		))
 		assert.Equal(t, calls, 1)
 	})
+}
+
+func TestWriteUsersSchemasInPostgreSQL(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("Mixed users", func(t *testing.T) {
+		calls := 0
+		exec := func(
+			_ context.Context, stdin io.Reader, _, _ io.Writer, command ...string,
+		) error {
+			calls++
+
+			b, err := io.ReadAll(stdin)
+			assert.NilError(t, err)
+
+			// The command strings will contain either of two possibilities, depending on the user called.
+			commands := strings.Join(command, ",")
+			re := regexp.MustCompile("--set=databases=\\[\"db1\"\\],--set=username=user-single-db|--set=databases=\\[\"db1\",\"db2\"\\],--set=username=user-multi-db")
+			assert.Assert(t, cmp.Regexp(re, commands))
+
+			assert.Assert(t, cmp.Contains(string(b), `CREATE SCHEMA IF NOT EXISTS :"username" AUTHORIZATION :"username";`))
+			return nil
+		}
+
+		assert.NilError(t, WriteUsersSchemasInPostgreSQL(ctx, exec,
+			[]v1beta1.PostgresUserSpec{
+				{
+					Name:      "user-single-db",
+					Databases: []v1beta1.PostgresIdentifier{"db1"},
+				},
+				{
+					Name: "user-no-databases",
+				},
+				{
+					Name:      "user-multi-dbs",
+					Databases: []v1beta1.PostgresIdentifier{"db1", "db2"},
+				},
+				{
+					Name:      "public",
+					Databases: []v1beta1.PostgresIdentifier{"db3"},
+				},
+			},
+		))
+		// The spec.users has four elements, but two will be skipped:
+		// 	* the user with the reserved name `public`
+		// 	* the user with 0 databases
+		assert.Equal(t, calls, 2)
+	})
+
 }

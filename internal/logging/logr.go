@@ -1,17 +1,6 @@
-/*
-Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
+// Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
 
 package logging
 
@@ -24,21 +13,24 @@ import (
 
 var global = logr.Discard()
 
-// Discard returns a logr.Logger that discards all messages logged to it.
-func Discard() logr.Logger { return logr.Discard() }
+// Logger is an interface to an abstract logging implementation.
+type Logger = logr.Logger
 
-// SetLogSink replaces the global logr.Logger with sink. Before this is called,
-// the global logr.Logger is a no-op.
+// Discard returns a Logger that discards all messages logged to it.
+func Discard() Logger { return logr.Discard() }
+
+// SetLogSink replaces the global Logger with sink. Before this is called,
+// the global Logger is a no-op.
 func SetLogSink(sink logr.LogSink) { global = logr.New(sink) }
 
 // NewContext returns a copy of ctx containing logger. Retrieve it using FromContext.
-func NewContext(ctx context.Context, logger logr.Logger) context.Context {
+func NewContext(ctx context.Context, logger Logger) context.Context {
 	return logr.NewContext(ctx, logger)
 }
 
-// FromContext returns the global logr.Logger or the one stored by a prior call
+// FromContext returns the global Logger or the one stored by a prior call
 // to NewContext.
-func FromContext(ctx context.Context) logr.Logger {
+func FromContext(ctx context.Context) Logger {
 	log, err := logr.FromContext(ctx)
 	if err != nil {
 		log = global

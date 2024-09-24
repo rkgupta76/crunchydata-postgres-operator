@@ -1,20 +1,6 @@
-//go:build envtest
-// +build envtest
-
-/*
- Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
- http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+// Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
 
 package postgrescluster
 
@@ -44,10 +30,7 @@ import (
 )
 
 func TestHandlePersistentVolumeClaimError(t *testing.T) {
-	scheme, err := runtime.CreatePostgresOperatorScheme()
-	assert.NilError(t, err)
-
-	recorder := events.NewRecorder(t, scheme)
+	recorder := events.NewRecorder(t, runtime.Scheme)
 	reconciler := &Reconciler{
 		Recorder: recorder,
 	}
@@ -287,7 +270,7 @@ func TestGetPVCNameMethods(t *testing.T) {
 			AccessModes: []corev1.PersistentVolumeAccessMode{
 				"ReadWriteMany",
 			},
-			Resources: corev1.ResourceRequirements{
+			Resources: corev1.VolumeResourceRequirements{
 				Requests: corev1.ResourceList{
 					corev1.ResourceStorage: resource.MustParse("1Gi"),
 				},
@@ -412,7 +395,7 @@ func TestReconcileConfigureExistingPVCs(t *testing.T) {
 				DataVolumeClaimSpec: corev1.PersistentVolumeClaimSpec{
 					AccessModes: []corev1.PersistentVolumeAccessMode{
 						corev1.ReadWriteMany},
-					Resources: corev1.ResourceRequirements{
+					Resources: corev1.VolumeResourceRequirements{
 						Requests: corev1.ResourceList{
 							corev1.ResourceStorage: resource.MustParse("1Gi"),
 						},
@@ -428,7 +411,7 @@ func TestReconcileConfigureExistingPVCs(t *testing.T) {
 							VolumeClaimSpec: corev1.PersistentVolumeClaimSpec{
 								AccessModes: []corev1.PersistentVolumeAccessMode{
 									corev1.ReadWriteMany},
-								Resources: corev1.ResourceRequirements{
+								Resources: corev1.VolumeResourceRequirements{
 									Requests: map[corev1.ResourceName]resource.
 										Quantity{
 										corev1.ResourceStorage: resource.
@@ -482,7 +465,7 @@ func TestReconcileConfigureExistingPVCs(t *testing.T) {
 		assert.Assert(t, len(clusterVolumes) == 1)
 
 		// observe again, but allow time for the change to be observed
-		err = wait.Poll(time.Second/2, Scale(time.Second*15), func() (bool, error) {
+		err = wait.PollUntilContextTimeout(ctx, time.Second/2, Scale(time.Second*15), false, func(ctx context.Context) (bool, error) {
 			clusterVolumes, err = r.observePersistentVolumeClaims(ctx, cluster)
 			return len(clusterVolumes) == 1, err
 		})
@@ -548,7 +531,7 @@ func TestReconcileConfigureExistingPVCs(t *testing.T) {
 		assert.Assert(t, len(clusterVolumes) == 2)
 
 		// observe again, but allow time for the change to be observed
-		err = wait.Poll(time.Second/2, Scale(time.Second*15), func() (bool, error) {
+		err = wait.PollUntilContextTimeout(ctx, time.Second/2, Scale(time.Second*15), false, func(ctx context.Context) (bool, error) {
 			clusterVolumes, err = r.observePersistentVolumeClaims(ctx, cluster)
 			return len(clusterVolumes) == 2, err
 		})
@@ -616,7 +599,7 @@ func TestReconcileConfigureExistingPVCs(t *testing.T) {
 		assert.Assert(t, len(clusterVolumes) == 3)
 
 		// observe again, but allow time for the change to be observed
-		err = wait.Poll(time.Second/2, Scale(time.Second*15), func() (bool, error) {
+		err = wait.PollUntilContextTimeout(ctx, time.Second/2, Scale(time.Second*15), false, func(ctx context.Context) (bool, error) {
 			clusterVolumes, err = r.observePersistentVolumeClaims(ctx, cluster)
 			return len(clusterVolumes) == 3, err
 		})
@@ -695,7 +678,7 @@ func TestReconcileMoveDirectories(t *testing.T) {
 				DataVolumeClaimSpec: corev1.PersistentVolumeClaimSpec{
 					AccessModes: []corev1.PersistentVolumeAccessMode{
 						corev1.ReadWriteMany},
-					Resources: corev1.ResourceRequirements{
+					Resources: corev1.VolumeResourceRequirements{
 						Requests: corev1.ResourceList{
 							corev1.ResourceStorage: resource.MustParse("1Gi"),
 						},
@@ -719,7 +702,7 @@ func TestReconcileMoveDirectories(t *testing.T) {
 							VolumeClaimSpec: corev1.PersistentVolumeClaimSpec{
 								AccessModes: []corev1.PersistentVolumeAccessMode{
 									corev1.ReadWriteMany},
-								Resources: corev1.ResourceRequirements{
+								Resources: corev1.VolumeResourceRequirements{
 									Requests: map[corev1.ResourceName]resource.
 										Quantity{
 										corev1.ResourceStorage: resource.
@@ -782,6 +765,8 @@ containers:
     privileged: false
     readOnlyRootFilesystem: true
     runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
   terminationMessagePath: /dev/termination-log
   terminationMessagePolicy: File
   volumeMounts:
@@ -804,7 +789,7 @@ volumes:
     claimName: testpgdata
 	`
 
-				assert.Assert(t, marshalMatches(moveJobs.Items[i].Spec.Template.Spec, compare+"\n"))
+				assert.Assert(t, cmp.MarshalMatches(moveJobs.Items[i].Spec.Template.Spec, compare+"\n"))
 			}
 		}
 
@@ -840,6 +825,8 @@ containers:
     privileged: false
     readOnlyRootFilesystem: true
     runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
   terminationMessagePath: /dev/termination-log
   terminationMessagePolicy: File
   volumeMounts:
@@ -862,7 +849,7 @@ volumes:
     claimName: testwal
 	`
 
-				assert.Assert(t, marshalMatches(moveJobs.Items[i].Spec.Template.Spec, compare+"\n"))
+				assert.Assert(t, cmp.MarshalMatches(moveJobs.Items[i].Spec.Template.Spec, compare+"\n"))
 			}
 		}
 
@@ -900,6 +887,8 @@ containers:
     privileged: false
     readOnlyRootFilesystem: true
     runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
   terminationMessagePath: /dev/termination-log
   terminationMessagePolicy: File
   volumeMounts:
@@ -921,7 +910,7 @@ volumes:
   persistentVolumeClaim:
     claimName: testrepo
 	`
-				assert.Assert(t, marshalMatches(moveJobs.Items[i].Spec.Template.Spec, compare+"\n"))
+				assert.Assert(t, cmp.MarshalMatches(moveJobs.Items[i].Spec.Template.Spec, compare+"\n"))
 			}
 		}
 

@@ -9,21 +9,17 @@ PGMONITOR_DIR ?= hack/tools/pgmonitor
 PGMONITOR_VERSION ?= v4.11.0
 QUERIES_CONFIG_DIR ?= hack/tools/queries
 
+EXTERNAL_SNAPSHOTTER_DIR ?= hack/tools/external-snapshotter
+EXTERNAL_SNAPSHOTTER_VERSION ?= v8.0.1
+
 # Buildah's "build" used to be "bud". Use the alias to be compatible for a while.
 BUILDAH_BUILD ?= buildah bud
 
-DEBUG_BUILD ?= false
 GO ?= go
-GO_BUILD = $(GO_CMD) build -trimpath
-GO_CMD = $(GO_ENV) $(GO)
+GO_BUILD = $(GO) build
 GO_TEST ?= $(GO) test
 KUTTL ?= kubectl-kuttl
 KUTTL_TEST ?= $(KUTTL) test
-
-# Disable optimizations if creating a debug build
-ifeq ("$(DEBUG_BUILD)", "true")
-	GO_BUILD = $(GO_CMD) build -gcflags='all=-N -l'
-endif
 
 ##@ General
 
@@ -59,6 +55,12 @@ get-pgmonitor:
 	cp -r '$(PGMONITOR_DIR)/postgres_exporter/common/.' '${QUERIES_CONFIG_DIR}'
 	cp '$(PGMONITOR_DIR)/postgres_exporter/linux/queries_backrest.yml' '${QUERIES_CONFIG_DIR}'
 
+.PHONY: get-external-snapshotter
+get-external-snapshotter:
+	git -C '$(dir $(EXTERNAL_SNAPSHOTTER_DIR))' clone https://github.com/kubernetes-csi/external-snapshotter.git || git -C '$(EXTERNAL_SNAPSHOTTER_DIR)' fetch origin
+	@git -C '$(EXTERNAL_SNAPSHOTTER_DIR)' checkout '$(EXTERNAL_SNAPSHOTTER_VERSION)'
+	@git -C '$(EXTERNAL_SNAPSHOTTER_DIR)' config pull.ff only
+
 .PHONY: clean
 clean: ## Clean resources
 clean: clean-deprecated
@@ -71,6 +73,7 @@ clean: clean-deprecated
 	[ ! -f hack/tools/setup-envtest ] || rm hack/tools/setup-envtest
 	[ ! -d hack/tools/envtest ] || { chmod -R u+w hack/tools/envtest && rm -r hack/tools/envtest; }
 	[ ! -d hack/tools/pgmonitor ] || rm -rf hack/tools/pgmonitor
+	[ ! -d hack/tools/external-snapshotter ] || rm -rf hack/tools/external-snapshotter
 	[ ! -n "$$(ls hack/tools)" ] || rm -r hack/tools/*
 	[ ! -d hack/.kube ] || rm -r hack/.kube
 
@@ -120,7 +123,7 @@ undeploy: ## Undeploy the PostgreSQL Operator
 
 .PHONY: deploy-dev
 deploy-dev: ## Deploy the PostgreSQL Operator locally
-deploy-dev: PGO_FEATURE_GATES ?= "TablespaceVolumes=true,CrunchyBridgeClusters=true"
+deploy-dev: PGO_FEATURE_GATES ?= "TablespaceVolumes=true,VolumeSnapshots=true"
 deploy-dev: get-pgmonitor
 deploy-dev: build-postgres-operator
 deploy-dev: createnamespaces
@@ -143,8 +146,9 @@ deploy-dev: createnamespaces
 ##@ Build - Binary
 .PHONY: build-postgres-operator
 build-postgres-operator: ## Build the postgres-operator binary
-	$(GO_BUILD) -ldflags '-X "main.versionString=$(PGO_VERSION)"' \
-		-o bin/postgres-operator ./cmd/postgres-operator
+	CGO_ENABLED=1 $(GO_BUILD) $(\
+		) --ldflags '-X "main.versionString=$(PGO_VERSION)"' $(\
+		) --trimpath -o bin/postgres-operator ./cmd/postgres-operator
 
 ##@ Build - Images
 .PHONY: build-postgres-operator-image
@@ -187,19 +191,19 @@ build-postgres-operator-image: build/postgres-operator/Dockerfile
 ##@ Test
 .PHONY: check
 check: ## Run basic go tests with coverage output
-	$(GO_TEST) -cover ./...
+check: get-pgmonitor
+	QUERIES_CONFIG_DIR="$(CURDIR)/${QUERIES_CONFIG_DIR}" $(GO_TEST) -cover ./...
 
 # Available versions: curl -s 'https://storage.googleapis.com/kubebuilder-tools/' | grep -o '<Key>[^<]*</Key>'
 # - KUBEBUILDER_ATTACH_CONTROL_PLANE_OUTPUT=true
 .PHONY: check-envtest
 check-envtest: ## Run check using envtest and a mock kube api
-check-envtest: ENVTEST_USE = hack/tools/setup-envtest --bin-dir=$(CURDIR)/hack/tools/envtest use $(ENVTEST_K8S_VERSION)
+check-envtest: ENVTEST_USE = $(ENVTEST) --bin-dir=$(CURDIR)/hack/tools/envtest use $(ENVTEST_K8S_VERSION)
 check-envtest: SHELL = bash
-check-envtest: get-pgmonitor
-	GOBIN='$(CURDIR)/hack/tools' $(GO) install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+check-envtest: get-pgmonitor tools/setup-envtest get-external-snapshotter
 	@$(ENVTEST_USE) --print=overview && echo
 	source <($(ENVTEST_USE) --print=env) && PGO_NAMESPACE="postgres-operator" QUERIES_CONFIG_DIR="$(CURDIR)/${QUERIES_CONFIG_DIR}" \
-		$(GO_TEST) -count=1 -cover -tags=envtest ./...
+		$(GO_TEST) -count=1 -cover ./...
 
 # The "PGO_TEST_TIMEOUT_SCALE" environment variable (default: 1) can be set to a
 # positive number that extends test timeouts. The following runs tests with 
@@ -207,11 +211,11 @@ check-envtest: get-pgmonitor
 # make check-envtest-existing PGO_TEST_TIMEOUT_SCALE=1.2
 .PHONY: check-envtest-existing
 check-envtest-existing: ## Run check using envtest and an existing kube api
-check-envtest-existing: get-pgmonitor
+check-envtest-existing: get-pgmonitor get-external-snapshotter
 check-envtest-existing: createnamespaces
 	kubectl apply --server-side -k ./config/dev
 	USE_EXISTING_CLUSTER=true PGO_NAMESPACE="postgres-operator" QUERIES_CONFIG_DIR="$(CURDIR)/${QUERIES_CONFIG_DIR}" \
-		$(GO_TEST) -count=1 -cover -p=1 -tags=envtest ./...
+		$(GO_TEST) -count=1 -cover -p=1 ./...
 	kubectl delete -k ./config/dev
 
 # Expects operator to be running
@@ -226,7 +230,7 @@ generate-kuttl: export KUTTL_PG_UPGRADE_FROM_VERSION ?= 15
 generate-kuttl: export KUTTL_PG_UPGRADE_TO_VERSION ?= 16
 generate-kuttl: export KUTTL_PG_VERSION ?= 16
 generate-kuttl: export KUTTL_POSTGIS_VERSION ?= 3.4
-generate-kuttl: export KUTTL_PSQL_IMAGE ?= registry.developers.crunchydata.com/crunchydata/crunchy-postgres:ubi8-16.2-0
+generate-kuttl: export KUTTL_PSQL_IMAGE ?= registry.developers.crunchydata.com/crunchydata/crunchy-postgres:ubi8-16.3-1
 generate-kuttl: export KUTTL_TEST_DELETE_NAMESPACE ?= kuttl-test-delete-namespace
 generate-kuttl: ## Generate kuttl tests
 	[ ! -d testing/kuttl/e2e-generated ] || rm -r testing/kuttl/e2e-generated
@@ -238,7 +242,6 @@ generate-kuttl: ## Generate kuttl tests
 	14 ) export KUTTL_BITNAMI_IMAGE_TAG=14.5.0-debian-11-r37 ;; \
 	13 ) export KUTTL_BITNAMI_IMAGE_TAG=13.8.0-debian-11-r39 ;; \
 	12 ) export KUTTL_BITNAMI_IMAGE_TAG=12.12.0-debian-11-r40 ;; \
-	11 ) export KUTTL_BITNAMI_IMAGE_TAG=11.17.0-debian-11-r39 ;; \
 	esac; \
 	render() { envsubst '"'"' \
 		$$KUTTL_PG_UPGRADE_FROM_VERSION $$KUTTL_PG_UPGRADE_TO_VERSION \
@@ -268,23 +271,24 @@ generate: generate-deepcopy
 generate: generate-rbac
 
 .PHONY: generate-crd
-generate-crd: ## Generate crd
-	GOBIN='$(CURDIR)/hack/tools' ./hack/controller-generator.sh \
+generate-crd: ## Generate Custom Resource Definitions (CRDs)
+generate-crd: tools/controller-gen
+	$(CONTROLLER) \
 		crd:crdVersions='v1' \
 		paths='./pkg/apis/...' \
 		output:dir='build/crd/postgresclusters/generated' # build/crd/{plural}/generated/{group}_{plural}.yaml
 	@
-	GOBIN='$(CURDIR)/hack/tools' ./hack/controller-generator.sh \
+	$(CONTROLLER) \
 		crd:crdVersions='v1' \
 		paths='./pkg/apis/...' \
 		output:dir='build/crd/pgupgrades/generated' # build/crd/{plural}/generated/{group}_{plural}.yaml
 	@
-	GOBIN='$(CURDIR)/hack/tools' ./hack/controller-generator.sh \
+	$(CONTROLLER) \
 		crd:crdVersions='v1' \
 		paths='./pkg/apis/...' \
 		output:dir='build/crd/pgadmins/generated' # build/crd/{plural}/generated/{group}_{plural}.yaml
 	@
-	GOBIN='$(CURDIR)/hack/tools' ./hack/controller-generator.sh \
+	$(CONTROLLER) \
 		crd:crdVersions='v1' \
 		paths='./pkg/apis/...' \
 		output:dir='build/crd/crunchybridgeclusters/generated' # build/crd/{plural}/generated/{group}_{plural}.yaml
@@ -295,15 +299,40 @@ generate-crd: ## Generate crd
 	kubectl kustomize ./build/crd/crunchybridgeclusters > ./config/crd/bases/postgres-operator.crunchydata.com_crunchybridgeclusters.yaml
 
 .PHONY: generate-deepcopy
-generate-deepcopy: ## Generate deepcopy functions
-	GOBIN='$(CURDIR)/hack/tools' ./hack/controller-generator.sh \
+generate-deepcopy: ## Generate DeepCopy functions
+generate-deepcopy: tools/controller-gen
+	$(CONTROLLER) \
 		object:headerFile='hack/boilerplate.go.txt' \
 		paths='./pkg/apis/postgres-operator.crunchydata.com/...'
 
 .PHONY: generate-rbac
-generate-rbac: ## Generate rbac
-	GOBIN='$(CURDIR)/hack/tools' ./hack/generate-rbac.sh \
-		'./internal/...' 'config/rbac'
+generate-rbac: ## Generate RBAC
+generate-rbac: tools/controller-gen
+	$(CONTROLLER) \
+		rbac:roleName='generated' \
+		paths='./cmd/...' paths='./internal/...' \
+		output:dir='config/rbac' # ${directory}/role.yaml
+	./hack/generate-rbac.sh 'config/rbac'
+
+##@ Tools
+
+.PHONY: tools
+tools: ## Download tools like controller-gen and kustomize if necessary.
+
+# go-get-tool will 'go install' any package $2 and install it to $1.
+define go-get-tool
+@[ -f '$(1)' ] || { echo Downloading '$(2)'; GOBIN='$(abspath $(dir $(1)))' $(GO) install '$(2)'; }
+endef
+
+CONTROLLER ?= hack/tools/controller-gen
+tools: tools/controller-gen
+tools/controller-gen:
+	$(call go-get-tool,$(CONTROLLER),sigs.k8s.io/controller-tools/cmd/controller-gen@v0.15.0)
+
+ENVTEST ?= hack/tools/setup-envtest
+tools: tools/setup-envtest
+tools/setup-envtest:
+	$(call go-get-tool,$(ENVTEST),sigs.k8s.io/controller-runtime/tools/setup-envtest@latest)
 
 ##@ Release
 

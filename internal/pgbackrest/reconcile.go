@@ -1,17 +1,6 @@
-/*
- Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
- http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+// Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
 
 package pgbackrest
 
@@ -24,11 +13,11 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/crunchydata/postgres-operator/internal/config"
+	"github.com/crunchydata/postgres-operator/internal/feature"
 	"github.com/crunchydata/postgres-operator/internal/initialize"
 	"github.com/crunchydata/postgres-operator/internal/naming"
 	"github.com/crunchydata/postgres-operator/internal/pki"
 	"github.com/crunchydata/postgres-operator/internal/postgres"
-	"github.com/crunchydata/postgres-operator/internal/util"
 	"github.com/crunchydata/postgres-operator/pkg/apis/postgres-operator.crunchydata.com/v1beta1"
 )
 
@@ -116,22 +105,15 @@ func AddConfigToInstancePod(
 		{Key: ConfigHashKey, Path: ConfigHashKey},
 	}
 
-	// As the cluster transitions from having a repository host to having none,
-	// PostgreSQL instances that have not rolled out expect to mount client
-	// certificates. Specify those files are optional so the configuration
-	// volumes stay valid and Kubernetes propagates their contents to those pods.
 	secret := corev1.VolumeProjection{Secret: &corev1.SecretProjection{}}
 	secret.Secret.Name = naming.PGBackRestSecret(cluster).Name
-	secret.Secret.Optional = initialize.Bool(true)
 
-	if DedicatedRepoHostEnabled(cluster) {
-		configmap.ConfigMap.Items = append(
-			configmap.ConfigMap.Items, corev1.KeyToPath{
-				Key:  serverConfigMapKey,
-				Path: serverConfigProjectionPath,
-			})
-		secret.Secret.Items = append(secret.Secret.Items, clientCertificates()...)
-	}
+	configmap.ConfigMap.Items = append(
+		configmap.ConfigMap.Items, corev1.KeyToPath{
+			Key:  serverConfigMapKey,
+			Path: serverConfigProjectionPath,
+		})
+	secret.Secret.Items = append(secret.Secret.Items, clientCertificates()...)
 
 	// Start with a copy of projections specified in the cluster. Items later in
 	// the list take precedence over earlier items (that is, last write wins).
@@ -289,6 +271,7 @@ func addConfigVolumeAndMounts(
 // addServerContainerAndVolume adds the TLS server container and certificate
 // projections to pod. Any PostgreSQL data and WAL volumes in pod are also mounted.
 func addServerContainerAndVolume(
+	ctx context.Context,
 	cluster *v1beta1.PostgresCluster, pod *corev1.PodSpec,
 	certificates []corev1.VolumeProjection, resources *corev1.ResourceRequirements,
 ) {
@@ -332,7 +315,7 @@ func addServerContainerAndVolume(
 		postgres.DataVolumeMount().Name: postgres.DataVolumeMount(),
 		postgres.WALVolumeMount().Name:  postgres.WALVolumeMount(),
 	}
-	if util.DefaultMutableFeatureGate.Enabled(util.TablespaceVolumes) {
+	if feature.Enabled(ctx, feature.TablespaceVolumes) {
 		for _, instance := range cluster.Spec.InstanceSets {
 			for _, vol := range instance.TablespaceVolumes {
 				tablespaceVolumeMount := postgres.TablespaceVolumeMount(vol.Name)
@@ -370,6 +353,7 @@ func addServerContainerAndVolume(
 // AddServerToInstancePod adds the TLS server container and volume to pod for
 // an instance of cluster. Any PostgreSQL volumes must already be in pod.
 func AddServerToInstancePod(
+	ctx context.Context,
 	cluster *v1beta1.PostgresCluster, pod *corev1.PodSpec,
 	instanceCertificateSecretName string,
 ) {
@@ -387,12 +371,13 @@ func AddServerToInstancePod(
 		resources = sidecars.PGBackRest.Resources
 	}
 
-	addServerContainerAndVolume(cluster, pod, certificates, resources)
+	addServerContainerAndVolume(ctx, cluster, pod, certificates, resources)
 }
 
 // AddServerToRepoPod adds the TLS server container and volume to pod for
 // the dedicated repository host of cluster.
 func AddServerToRepoPod(
+	ctx context.Context,
 	cluster *v1beta1.PostgresCluster, pod *corev1.PodSpec,
 ) {
 	certificates := []corev1.VolumeProjection{{
@@ -409,7 +394,7 @@ func AddServerToRepoPod(
 		resources = &cluster.Spec.Backups.PGBackRest.RepoHost.Resources
 	}
 
-	addServerContainerAndVolume(cluster, pod, certificates, resources)
+	addServerContainerAndVolume(ctx, cluster, pod, certificates, resources)
 }
 
 // InstanceCertificates populates the shared Secret with certificates needed to run pgBackRest.
@@ -421,15 +406,13 @@ func InstanceCertificates(ctx context.Context,
 ) error {
 	var err error
 
-	if DedicatedRepoHostEnabled(inCluster) {
-		initialize.ByteMap(&outInstanceCertificates.Data)
+	initialize.ByteMap(&outInstanceCertificates.Data)
 
-		if err == nil {
-			outInstanceCertificates.Data[certInstanceSecretKey], err = certFile(inDNS)
-		}
-		if err == nil {
-			outInstanceCertificates.Data[certInstancePrivateKeySecretKey], err = certFile(inDNSKey)
-		}
+	if err == nil {
+		outInstanceCertificates.Data[certInstanceSecretKey], err = certFile(inDNS)
+	}
+	if err == nil {
+		outInstanceCertificates.Data[certInstancePrivateKeySecretKey], err = certFile(inDNSKey)
 	}
 
 	return err

@@ -1,17 +1,6 @@
-/*
- Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
- http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+// Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
 
 package pgbackrest
 
@@ -131,6 +120,7 @@ pg1-socket-path = /tmp/postgres
 # Your changes will not be saved.
 
 [global]
+archive-async = y
 log-path = /pgdata/pgbackrest/log
 repo1-host = repo-hostname-0.pod-service-name.test-ns.svc.`+domain+`
 repo1-host-ca-file = /etc/pgbackrest/conf.d/~postgres-operator/tls-ca.crt
@@ -151,6 +141,7 @@ repo4-s3-bucket = s-bucket
 repo4-s3-endpoint = endpoint-s
 repo4-s3-region = earth
 repo4-type = s3
+spool-path = /pgdata/pgbackrest-spool
 
 [db]
 pg1-path = /pgdata/pg12

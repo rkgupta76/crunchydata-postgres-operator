@@ -1,17 +1,6 @@
-/*
- Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
- http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+// Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
 
 package initialize_test
 
@@ -20,6 +9,7 @@ import (
 	"testing"
 
 	"gotest.tools/v3/assert"
+	corev1 "k8s.io/api/core/v1"
 
 	"github.com/crunchydata/postgres-operator/internal/initialize"
 )
@@ -59,9 +49,10 @@ func TestPodSecurityContext(t *testing.T) {
 		assert.Assert(t, psc.RunAsUser == nil,
 			`Containers must not set runAsUser to 0`)
 
-		// TODO(cbandy): delegate to v1.SecurityContext
-		assert.Assert(t, psc.SeccompProfile == nil,
-			`Seccomp profile must be explicitly set to one of the allowed values. Both the Unconfined profile and the absence of a profile are prohibited.`)
+		if assert.Check(t, psc.SeccompProfile == nil) {
+			assert.Assert(t, initialize.RestrictedSecurityContext().SeccompProfile != nil,
+				`SeccompProfile should be delegated to the container-level v1.SecurityContext`)
+		}
 	})
 }
 
@@ -121,7 +112,7 @@ func TestRestrictedSecurityContext(t *testing.T) {
 		// of OpenShift 4.11 uses the "runtime/default" profile.
 		// - https://docs.openshift.com/container-platform/4.10/security/seccomp-profiles.html
 		// - https://docs.openshift.com/container-platform/4.11/security/seccomp-profiles.html
-		assert.Assert(t, sc.SeccompProfile == nil,
+		assert.Assert(t, sc.SeccompProfile.Type == corev1.SeccompProfileTypeRuntimeDefault,
 			`Seccomp profile must be explicitly set to one of the allowed values. Both the Unconfined profile and the absence of a profile are prohibited.`)
 	})
 

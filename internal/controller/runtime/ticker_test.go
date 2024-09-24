@@ -1,17 +1,6 @@
-/*
- Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
- http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+// Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
 
 package runtime
 
@@ -25,7 +14,6 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
 
 func TestTickerString(t *testing.T) {
@@ -41,21 +29,21 @@ func TestTicker(t *testing.T) {
 	expected := event.GenericEvent{Object: new(corev1.ConfigMap)}
 
 	tq := workqueue.NewRateLimitingQueue(workqueue.DefaultItemBasedRateLimiter())
-	th := handler.Funcs{GenericFunc: func(e event.GenericEvent, q workqueue.RateLimitingInterface) {
+	th := handler.Funcs{GenericFunc: func(ctx context.Context, e event.GenericEvent, q workqueue.RateLimitingInterface) {
 		called = append(called, e)
 
 		assert.Equal(t, q, tq, "should be called with the queue passed in Start")
 	}}
 
-	t.Run("WithoutPredicates", func(t *testing.T) {
+	t.Run("NotImmediate", func(t *testing.T) {
 		called = nil
 
-		ticker := NewTicker(100*time.Millisecond, expected)
+		ticker := NewTicker(100*time.Millisecond, expected, th)
 		ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 		t.Cleanup(cancel)
 
 		// Start the ticker and wait for the deadline to pass.
-		assert.NilError(t, ticker.Start(ctx, th, tq))
+		assert.NilError(t, ticker.Start(ctx, tq))
 		<-ctx.Done()
 
 		assert.Equal(t, len(called), 2)
@@ -63,36 +51,15 @@ func TestTicker(t *testing.T) {
 		assert.Equal(t, called[1], expected, "expected at 200ms")
 	})
 
-	t.Run("WithPredicates", func(t *testing.T) {
-		called = nil
-
-		// Predicates that exclude events after a fixed number have passed.
-		pLength := predicate.Funcs{GenericFunc: func(event.GenericEvent) bool { return len(called) < 3 }}
-		pTrue := predicate.Funcs{GenericFunc: func(event.GenericEvent) bool { return true }}
-
-		ticker := NewTicker(50*time.Millisecond, expected)
-		ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
-		t.Cleanup(cancel)
-
-		// Start the ticker and wait for the deadline to pass.
-		assert.NilError(t, ticker.Start(ctx, th, tq, pTrue, pLength))
-		<-ctx.Done()
-
-		assert.Equal(t, len(called), 3)
-		assert.Equal(t, called[0], expected)
-		assert.Equal(t, called[1], expected)
-		assert.Equal(t, called[2], expected)
-	})
-
 	t.Run("Immediate", func(t *testing.T) {
 		called = nil
 
-		ticker := NewTickerImmediate(100*time.Millisecond, expected)
+		ticker := NewTickerImmediate(100*time.Millisecond, expected, th)
 		ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 		t.Cleanup(cancel)
 
 		// Start the ticker and wait for the deadline to pass.
-		assert.NilError(t, ticker.Start(ctx, th, tq))
+		assert.NilError(t, ticker.Start(ctx, tq))
 		<-ctx.Done()
 
 		assert.Assert(t, len(called) > 2)

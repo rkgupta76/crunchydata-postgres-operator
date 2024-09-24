@@ -1,16 +1,7 @@
 <!--
- Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
- http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
+# Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
+#
+# SPDX-License-Identifier: Apache-2.0
 -->
 
 # pgBackRest TLS Server
@@ -21,8 +12,10 @@ on different pods:
 - [dedicated repository host](https://pgbackrest.org/user-guide.html#repo-host)
 - [backup from standby](https://pgbackrest.org/user-guide.html#standby-backup)
 
-When a PostgresCluster is configured to store backups on a PVC, we start a dedicated
-repository host to make that PVC available to all PostgreSQL instances in the cluster.
+When a PostgresCluster is configured to store backups on a PVC, the dedicated
+repository host is used to make that PVC available to all PostgreSQL instances
+in the cluster. Regardless of whether the repo host has a defined PVC, it
+functions as the server for the pgBackRest clients that run on the Instances.
 
 The repository host runs a `pgbackrest` server that is secured through TLS and
 [certificates][]. When performing backups, it connects to `pgbackrest` servers

@@ -1,17 +1,6 @@
-/*
- Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
- http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+// Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
 
 package bridge
 
@@ -61,7 +50,7 @@ type Installation struct {
 type InstallationReconciler struct {
 	Owner  client.FieldOwner
 	Reader interface {
-		Get(context.Context, client.ObjectKey, client.Object) error
+		Get(context.Context, client.ObjectKey, client.Object, ...client.GetOption) error
 	}
 	Writer interface {
 		Patch(context.Context, client.Object, client.Patch, ...client.PatchOption) error
@@ -102,11 +91,14 @@ func ManagedInstallationReconciler(m manager.Manager, newClient func() *Client) 
 		)).
 		//
 		// Wake periodically even when that Secret does not exist.
-		Watches(
-			runtime.NewTickerImmediate(time.Hour, event.GenericEvent{}),
-			handler.EnqueueRequestsFromMapFunc(func(client.Object) []reconcile.Request {
-				return []reconcile.Request{{NamespacedName: reconciler.SecretRef}}
-			}),
+		WatchesRawSource(
+			runtime.NewTickerImmediate(time.Hour, event.GenericEvent{},
+				handler.EnqueueRequestsFromMapFunc(
+					func(context.Context, client.Object) []reconcile.Request {
+						return []reconcile.Request{{NamespacedName: reconciler.SecretRef}}
+					},
+				),
+			),
 		).
 		//
 		Complete(reconciler)
@@ -128,13 +120,15 @@ func (r *InstallationReconciler) Reconcile(
 		result.RequeueAfter, err = r.reconcile(ctx, secret)
 	}
 
-	// TODO: Check for corev1.NamespaceTerminatingCause after
-	// k8s.io/apimachinery@v0.25; see https://issue.k8s.io/108528.
+	// Nothing can be written to a deleted namespace.
+	if err != nil && apierrors.HasStatusCause(err, corev1.NamespaceTerminatingCause) {
+		return runtime.ErrorWithoutBackoff(err)
+	}
 
 	// Write conflicts are returned as errors; log and retry with backoff.
 	if err != nil && apierrors.IsConflict(err) {
 		logging.FromContext(ctx).Info("Requeue", "reason", err)
-		err, result.Requeue, result.RequeueAfter = nil, true, 0
+		return runtime.RequeueWithBackoff(), nil
 	}
 
 	return result, err

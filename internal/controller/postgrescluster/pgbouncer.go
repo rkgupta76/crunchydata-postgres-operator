@@ -1,17 +1,6 @@
-/*
- Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
- http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+// Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
 
 package postgrescluster
 
@@ -181,8 +170,8 @@ func (r *Reconciler) reconcilePGBouncerInPostgreSQL(
 
 	if err == nil {
 		ctx := logging.NewContext(ctx, logging.FromContext(ctx).WithValues("revision", revision))
-		err = action(ctx, func(_ context.Context, stdin io.Reader, stdout, stderr io.Writer, command ...string) error {
-			return r.PodExec(pod.Namespace, pod.Name, naming.ContainerDatabase, stdin, stdout, stderr, command...)
+		err = action(ctx, func(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, command ...string) error {
+			return r.PodExec(ctx, pod.Namespace, pod.Name, naming.ContainerDatabase, stdin, stdout, stderr, command...)
 		})
 	}
 	if err == nil {
@@ -315,6 +304,12 @@ func (r *Reconciler) generatePGBouncerService(
 			}
 			servicePort.NodePort = *spec.NodePort
 		}
+		if spec.ExternalTrafficPolicy != nil {
+			service.Spec.ExternalTrafficPolicy = *spec.ExternalTrafficPolicy
+		}
+		if spec.InternalTrafficPolicy != nil {
+			service.Spec.InternalTrafficPolicy = spec.InternalTrafficPolicy
+		}
 	}
 	service.Spec.Ports = []corev1.ServicePort{servicePort}
 
@@ -351,7 +346,7 @@ func (r *Reconciler) reconcilePGBouncerService(
 
 // generatePGBouncerDeployment returns an appsv1.Deployment that runs PgBouncer pods.
 func (r *Reconciler) generatePGBouncerDeployment(
-	cluster *v1beta1.PostgresCluster,
+	ctx context.Context, cluster *v1beta1.PostgresCluster,
 	primaryCertificate *corev1.SecretProjection,
 	configmap *corev1.ConfigMap, secret *corev1.Secret,
 ) (*appsv1.Deployment, bool, error) {
@@ -455,7 +450,7 @@ func (r *Reconciler) generatePGBouncerDeployment(
 	err := errors.WithStack(r.setControllerReference(cluster, deploy))
 
 	if err == nil {
-		pgbouncer.Pod(cluster, configmap, primaryCertificate, secret, &deploy.Spec.Template.Spec)
+		pgbouncer.Pod(ctx, cluster, configmap, primaryCertificate, secret, &deploy.Spec.Template.Spec)
 	}
 
 	return deploy, true, err
@@ -471,7 +466,7 @@ func (r *Reconciler) reconcilePGBouncerDeployment(
 	configmap *corev1.ConfigMap, secret *corev1.Secret,
 ) error {
 	deploy, specified, err := r.generatePGBouncerDeployment(
-		cluster, primaryCertificate, configmap, secret)
+		ctx, cluster, primaryCertificate, configmap, secret)
 
 	// Set observations whether the deployment exists or not.
 	defer func() {

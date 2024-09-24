@@ -1,17 +1,6 @@
-/*
- Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
- http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+// Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
 
 package postgrescluster
 
@@ -290,7 +279,9 @@ func (r *Reconciler) reconcileClusterReplicaService(
 func (r *Reconciler) reconcileDataSource(ctx context.Context,
 	cluster *v1beta1.PostgresCluster, observed *observedInstances,
 	clusterVolumes []corev1.PersistentVolumeClaim,
-	rootCA *pki.RootCertificateAuthority) (bool, error) {
+	rootCA *pki.RootCertificateAuthority,
+	backupsSpecFound bool,
+) (bool, error) {
 
 	// a hash func to hash the pgBackRest restore options
 	hashFunc := func(jobConfigs []string) (string, error) {
@@ -413,7 +404,8 @@ func (r *Reconciler) reconcileDataSource(ctx context.Context,
 	switch {
 	case dataSource != nil:
 		if err := r.reconcilePostgresClusterDataSource(ctx, cluster, dataSource,
-			configHash, clusterVolumes, rootCA); err != nil {
+			configHash, clusterVolumes, rootCA,
+			backupsSpecFound); err != nil {
 			return true, err
 		}
 	case cloudDataSource != nil:

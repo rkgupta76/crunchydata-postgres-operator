@@ -1,16 +1,6 @@
 // Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package pgupgrade
 
@@ -23,15 +13,16 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
-	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	"github.com/crunchydata/postgres-operator/internal/config"
+	"github.com/crunchydata/postgres-operator/internal/controller/runtime"
+	"github.com/crunchydata/postgres-operator/internal/registration"
 	"github.com/crunchydata/postgres-operator/pkg/apis/postgres-operator.crunchydata.com/v1beta1"
 )
 
@@ -41,14 +32,11 @@ const (
 
 // PGUpgradeReconciler reconciles a PGUpgrade object
 type PGUpgradeReconciler struct {
-	client.Client
+	Client client.Client
 	Owner  client.FieldOwner
-	Scheme *runtime.Scheme
 
-	// For this iteration, we will only be setting conditions rather than
-	// setting conditions and emitting events. That may change in the future,
-	// so we're leaving this EventRecorder here for now.
-	// record.EventRecorder
+	Recorder     record.EventRecorder
+	Registration registration.Registration
 }
 
 //+kubebuilder:rbac:groups="batch",resources="jobs",verbs={list,watch}
@@ -61,7 +49,7 @@ func (r *PGUpgradeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&v1beta1.PGUpgrade{}).
 		Owns(&batchv1.Job{}).
 		Watches(
-			&source.Kind{Type: v1beta1.NewPostgresCluster()},
+			v1beta1.NewPostgresCluster(),
 			r.watchPostgresClusters(),
 		).
 		Complete(r)
@@ -80,7 +68,7 @@ func (r *PGUpgradeReconciler) findUpgradesForPostgresCluster(
 	// namespace, we can configure the [ctrl.Manager] field indexer and pass a
 	// [fields.Selector] here.
 	// - https://book.kubebuilder.io/reference/watching-resources/externally-managed.html
-	if r.List(ctx, &upgrades, &client.ListOptions{
+	if r.Client.List(ctx, &upgrades, &client.ListOptions{
 		Namespace: cluster.Namespace,
 	}) == nil {
 		for i := range upgrades.Items {
@@ -94,8 +82,7 @@ func (r *PGUpgradeReconciler) findUpgradesForPostgresCluster(
 
 // watchPostgresClusters returns a [handler.EventHandler] for PostgresClusters.
 func (r *PGUpgradeReconciler) watchPostgresClusters() handler.Funcs {
-	handle := func(cluster client.Object, q workqueue.RateLimitingInterface) {
-		ctx := context.Background()
+	handle := func(ctx context.Context, cluster client.Object, q workqueue.RateLimitingInterface) {
 		key := client.ObjectKeyFromObject(cluster)
 
 		for _, upgrade := range r.findUpgradesForPostgresCluster(ctx, key) {
@@ -106,14 +93,14 @@ func (r *PGUpgradeReconciler) watchPostgresClusters() handler.Funcs {
 	}
 
 	return handler.Funcs{
-		CreateFunc: func(e event.CreateEvent, q workqueue.RateLimitingInterface) {
-			handle(e.Object, q)
+		CreateFunc: func(ctx context.Context, e event.CreateEvent, q workqueue.RateLimitingInterface) {
+			handle(ctx, e.Object, q)
 		},
-		UpdateFunc: func(e event.UpdateEvent, q workqueue.RateLimitingInterface) {
-			handle(e.ObjectNew, q)
+		UpdateFunc: func(ctx context.Context, e event.UpdateEvent, q workqueue.RateLimitingInterface) {
+			handle(ctx, e.ObjectNew, q)
 		},
-		DeleteFunc: func(e event.DeleteEvent, q workqueue.RateLimitingInterface) {
-			handle(e.Object, q)
+		DeleteFunc: func(ctx context.Context, e event.DeleteEvent, q workqueue.RateLimitingInterface) {
+			handle(ctx, e.Object, q)
 		},
 	}
 }
@@ -140,14 +127,14 @@ func (r *PGUpgradeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// copy before returning from its cache.
 	// - https://github.com/kubernetes-sigs/controller-runtime/issues/1235
 	upgrade := &v1beta1.PGUpgrade{}
-	err = r.Get(ctx, req.NamespacedName, upgrade)
+	err = r.Client.Get(ctx, req.NamespacedName, upgrade)
 
 	if err == nil {
 		// Write any changes to the upgrade status on the way out.
 		before := upgrade.DeepCopy()
 		defer func() {
 			if !equality.Semantic.DeepEqual(before.Status, upgrade.Status) {
-				status := r.Status().Patch(ctx, upgrade, client.MergeFrom(before), r.Owner)
+				status := r.Client.Status().Patch(ctx, upgrade, client.MergeFrom(before), r.Owner)
 
 				if err == nil && status != nil {
 					err = status
@@ -176,6 +163,10 @@ func (r *PGUpgradeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		ConditionPGUpgradeSucceeded)
 	if succeeded != nil && succeeded.Reason == "PGUpgradeSucceeded" {
 		return
+	}
+
+	if !r.UpgradeAuthorized(upgrade) {
+		return ctrl.Result{}, nil
 	}
 
 	// Set progressing condition to true if it doesn't exist already
@@ -452,7 +443,7 @@ func (r *PGUpgradeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			// Set the pgBackRest status for bootstrapping
 			patch.Status.PGBackRest.Repos = []v1beta1.RepoStatus{}
 
-			err = r.Status().Patch(ctx, patch, client.MergeFrom(world.Cluster), r.Owner)
+			err = r.Client.Status().Patch(ctx, patch, client.MergeFrom(world.Cluster), r.Owner)
 		}
 
 		return ctrl.Result{}, err
@@ -493,7 +484,7 @@ func (r *PGUpgradeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 
 		// Requeue to verify that Patroni endpoints are deleted
-		return ctrl.Result{Requeue: true}, err // FIXME
+		return runtime.RequeueWithBackoff(), err // FIXME
 	}
 
 	// TODO: write upgradeJob back to world? No, we will wake and see it when it
@@ -501,9 +492,7 @@ func (r *PGUpgradeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// TODO: consider what it means to "re-use" the same PGUpgrade for more than
 	// one postgres version. Should the job name include the version number?
 
-	log.Info("Reconciled", "requeue", err != nil ||
-		result.Requeue ||
-		result.RequeueAfter > 0)
+	log.Info("Reconciled", "requeue", !result.IsZero() || err != nil)
 	return
 }
 

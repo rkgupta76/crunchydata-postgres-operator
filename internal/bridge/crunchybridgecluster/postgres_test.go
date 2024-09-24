@@ -1,20 +1,6 @@
-//go:build envtest
-// +build envtest
-
-/*
- Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
- http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+// Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
 
 package crunchybridgecluster
 
@@ -22,8 +8,11 @@ import (
 	"context"
 	"testing"
 
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
 	"gotest.tools/v3/assert"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/crunchydata/postgres-operator/internal/bridge"
@@ -32,10 +21,13 @@ import (
 )
 
 func TestGeneratePostgresRoleSecret(t *testing.T) {
-	_, tClient := setupKubernetes(t)
+	tClient := setupKubernetes(t)
 	require.ParallelCapacity(t, 0)
 
-	reconciler := &CrunchyBridgeClusterReconciler{Client: tClient}
+	reconciler := &CrunchyBridgeClusterReconciler{
+		Client: tClient,
+		Owner:  "crunchybridgecluster-controller",
+	}
 
 	cluster := testCluster()
 	cluster.Namespace = setupNamespace(t, tClient).Name
@@ -79,13 +71,16 @@ func TestGeneratePostgresRoleSecret(t *testing.T) {
 
 func TestReconcilePostgresRoleSecrets(t *testing.T) {
 	ctx := context.Background()
-	_, tClient := setupKubernetes(t)
+	tClient := setupKubernetes(t)
 	require.ParallelCapacity(t, 0)
 
-	reconciler := &CrunchyBridgeClusterReconciler{Client: tClient}
-
-	apiKey := "1234567890"
+	apiKey := "9012"
 	ns := setupNamespace(t, tClient).Name
+
+	reconciler := &CrunchyBridgeClusterReconciler{
+		Client: tClient,
+		Owner:  "crunchybridgecluster-controller",
+	}
 
 	t.Run("DuplicateSecretNameInSpec", func(t *testing.T) {
 		cluster := testCluster()
@@ -118,7 +113,7 @@ func TestReconcilePostgresRoleSecrets(t *testing.T) {
 				"path": "stuff",
 			},
 		}
-		assert.NilError(t, tClient.Create(ctx, secret.DeepCopy()))
+		assert.NilError(t, tClient.Create(ctx, secret))
 
 		cluster := testCluster()
 		cluster.Namespace = ns
@@ -135,5 +130,110 @@ func TestReconcilePostgresRoleSecrets(t *testing.T) {
 		assert.Check(t, secretMap == nil)
 		assert.ErrorContains(t, err, "There is already an existing Secret in this namespace with the name role-secret. "+
 			"Please choose a different name for this role's Secret.", "expected duplicate secret name error")
+	})
+
+	t.Run("UnusedSecretsGetRemoved", func(t *testing.T) {
+		applicationRoleInBridge := testClusterRoleApiResource()
+		postgresRoleInBridge := testClusterRoleApiResource()
+		postgresRoleInBridge.Name = "postgres"
+		postgresRoleInBridge.Password = "postgres-password"
+		reconciler.NewClient = func() bridge.ClientInterface {
+			return &TestBridgeClient{
+				ApiKey:       apiKey,
+				TeamId:       "5678",
+				ClusterRoles: []*bridge.ClusterRoleApiResource{applicationRoleInBridge, postgresRoleInBridge},
+			}
+		}
+
+		applicationSpec := &v1beta1.CrunchyBridgeClusterRoleSpec{
+			Name:       "application",
+			SecretName: "application-role-secret",
+		}
+		postgresSpec := &v1beta1.CrunchyBridgeClusterRoleSpec{
+			Name:       "postgres",
+			SecretName: "postgres-role-secret",
+		}
+
+		cluster := testCluster()
+		cluster.Namespace = ns
+		cluster.Status.ID = "1234"
+		// Add one role to cluster spec
+		cluster.Spec.Roles = append(cluster.Spec.Roles, applicationSpec)
+		assert.NilError(t, tClient.Create(ctx, cluster))
+
+		applicationRole := &bridge.ClusterRoleApiResource{
+			Name:     "application",
+			Password: "application-password",
+			URI:      "connection-string",
+		}
+		postgresRole := &bridge.ClusterRoleApiResource{
+			Name:     "postgres",
+			Password: "postgres-password",
+			URI:      "connection-string",
+		}
+
+		// Generate secrets
+		applicationSecret, err := reconciler.generatePostgresRoleSecret(cluster, applicationSpec, applicationRole)
+		assert.NilError(t, err)
+		postgresSecret, err := reconciler.generatePostgresRoleSecret(cluster, postgresSpec, postgresRole)
+		assert.NilError(t, err)
+
+		// Create secrets in k8s
+		assert.NilError(t, tClient.Create(ctx, applicationSecret))
+		assert.NilError(t, tClient.Create(ctx, postgresSecret))
+
+		roleSpecSlice, secretMap, err := reconciler.reconcilePostgresRoleSecrets(ctx, apiKey, cluster)
+		assert.Check(t, roleSpecSlice != nil)
+		assert.Check(t, secretMap != nil)
+		assert.NilError(t, err)
+
+		// Assert that postgresSecret was deleted since its associated role is not in the spec
+		err = tClient.Get(ctx, client.ObjectKeyFromObject(postgresSecret), postgresSecret)
+		assert.Assert(t, apierrors.IsNotFound(err), "expected NotFound, got %#v", err)
+
+		// Assert that applicationSecret is still there
+		err = tClient.Get(ctx, client.ObjectKeyFromObject(applicationSecret), applicationSecret)
+		assert.NilError(t, err)
+	})
+
+	t.Run("SecretsGetUpdated", func(t *testing.T) {
+		clusterRoleInBridge := testClusterRoleApiResource()
+		clusterRoleInBridge.Password = "different-password"
+		reconciler.NewClient = func() bridge.ClientInterface {
+			return &TestBridgeClient{
+				ApiKey:       apiKey,
+				TeamId:       "5678",
+				ClusterRoles: []*bridge.ClusterRoleApiResource{clusterRoleInBridge},
+			}
+		}
+
+		cluster := testCluster()
+		cluster.Namespace = ns
+		err := tClient.Get(ctx, client.ObjectKeyFromObject(cluster), cluster)
+		assert.NilError(t, err)
+		cluster.Status.ID = "1234"
+
+		spec1 := &v1beta1.CrunchyBridgeClusterRoleSpec{
+			Name:       "application",
+			SecretName: "application-role-secret",
+		}
+		role1 := &bridge.ClusterRoleApiResource{
+			Name:     "application",
+			Password: "test",
+			URI:      "connection-string",
+		}
+		// Generate secret
+		secret1, err := reconciler.generatePostgresRoleSecret(cluster, spec1, role1)
+		assert.NilError(t, err)
+
+		roleSpecSlice, secretMap, err := reconciler.reconcilePostgresRoleSecrets(ctx, apiKey, cluster)
+		assert.Check(t, roleSpecSlice != nil)
+		assert.Check(t, secretMap != nil)
+		assert.NilError(t, err)
+
+		// Assert that secret1 was updated
+		err = tClient.Get(ctx, client.ObjectKeyFromObject(secret1), secret1)
+		assert.NilError(t, err)
+		assert.Equal(t, string(secret1.Data["password"]), "different-password")
 	})
 }

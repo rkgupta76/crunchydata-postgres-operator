@@ -1,17 +1,6 @@
-/*
- Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
- http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+// Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
 
 package naming
 
@@ -257,6 +246,15 @@ func ClusterReplicaService(cluster *v1beta1.PostgresCluster) metav1.ObjectMeta {
 	return metav1.ObjectMeta{
 		Namespace: cluster.Namespace,
 		Name:      cluster.Name + "-replicas",
+	}
+}
+
+// ClusterVolumeSnapshot returns the ObjectMeta, including a random name, for a
+// new pgdata VolumeSnapshot.
+func ClusterVolumeSnapshot(cluster *v1beta1.PostgresCluster) metav1.ObjectMeta {
+	return metav1.ObjectMeta{
+		Namespace: cluster.Namespace,
+		Name:      cluster.Name + "-pgdata-snapshot-" + rand.String(4),
 	}
 }
 
@@ -565,16 +563,6 @@ func MovePGBackRestRepoDirJob(cluster *v1beta1.PostgresCluster) metav1.ObjectMet
 	return metav1.ObjectMeta{
 		Namespace: cluster.GetNamespace(),
 		Name:      cluster.Name + "-move-pgbackrest-repo-dir",
-	}
-}
-
-// StandalonePGAdminCommonLabels returns the ObjectMeta used for the standalone
-// pgAdmin StatefulSet and Pod.
-func StandalonePGAdminCommonLabels(pgadmin *v1beta1.PGAdmin) map[string]string {
-	return map[string]string{
-		LabelStandalonePGAdmin: pgadmin.Name,
-		LabelData:              DataPGAdmin,
-		LabelRole:              RolePGAdmin,
 	}
 }
 

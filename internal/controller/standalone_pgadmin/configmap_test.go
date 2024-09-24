@@ -1,16 +1,6 @@
 // Copyright 2023 - 2024 Crunchy Data Solutions, Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package standalone_pgadmin
 
@@ -218,4 +208,86 @@ namespace: some-ns
 			"postgres-operator.crunchydata.com/role":    "pgadmin",
 		})
 	})
+}
+
+func TestGenerateGunicornConfig(t *testing.T) {
+	require.ParallelCapacity(t, 0)
+
+	t.Run("Default", func(t *testing.T) {
+		pgAdmin := &v1beta1.PGAdmin{}
+		pgAdmin.Name = "test"
+		pgAdmin.Namespace = "postgres-operator"
+
+		expectedString := `{
+  "bind": "0.0.0.0:5050",
+  "threads": 25,
+  "workers": 1
+}
+`
+		actualString, err := generateGunicornConfig(pgAdmin)
+		assert.NilError(t, err)
+		assert.Equal(t, actualString, expectedString)
+	})
+
+	t.Run("Add Settings", func(t *testing.T) {
+		pgAdmin := &v1beta1.PGAdmin{}
+		pgAdmin.Name = "test"
+		pgAdmin.Namespace = "postgres-operator"
+		pgAdmin.Spec.Config.Gunicorn = map[string]any{
+			"keyfile":  "/path/to/keyfile",
+			"certfile": "/path/to/certfile",
+		}
+
+		expectedString := `{
+  "bind": "0.0.0.0:5050",
+  "certfile": "/path/to/certfile",
+  "keyfile": "/path/to/keyfile",
+  "threads": 25,
+  "workers": 1
+}
+`
+		actualString, err := generateGunicornConfig(pgAdmin)
+		assert.NilError(t, err)
+		assert.Equal(t, actualString, expectedString)
+	})
+
+	t.Run("Update Defaults", func(t *testing.T) {
+		pgAdmin := &v1beta1.PGAdmin{}
+		pgAdmin.Name = "test"
+		pgAdmin.Namespace = "postgres-operator"
+		pgAdmin.Spec.Config.Gunicorn = map[string]any{
+			"bind":    "127.0.0.1:5051",
+			"threads": 30,
+		}
+
+		expectedString := `{
+  "bind": "127.0.0.1:5051",
+  "threads": 30,
+  "workers": 1
+}
+`
+		actualString, err := generateGunicornConfig(pgAdmin)
+		assert.NilError(t, err)
+		assert.Equal(t, actualString, expectedString)
+	})
+
+	t.Run("Update Mandatory", func(t *testing.T) {
+		pgAdmin := &v1beta1.PGAdmin{}
+		pgAdmin.Name = "test"
+		pgAdmin.Namespace = "postgres-operator"
+		pgAdmin.Spec.Config.Gunicorn = map[string]any{
+			"workers": "100",
+		}
+
+		expectedString := `{
+  "bind": "0.0.0.0:5050",
+  "threads": 25,
+  "workers": 1
+}
+`
+		actualString, err := generateGunicornConfig(pgAdmin)
+		assert.NilError(t, err)
+		assert.Equal(t, actualString, expectedString)
+	})
+
 }

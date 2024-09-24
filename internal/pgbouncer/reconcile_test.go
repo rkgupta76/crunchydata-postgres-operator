@@ -1,17 +1,6 @@
-/*
- Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
- http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+// Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
 
 package pgbouncer
 
@@ -19,14 +8,15 @@ import (
 	"context"
 	"testing"
 
-	"github.com/google/go-cmp/cmp"
+	gocmp "github.com/google/go-cmp/cmp"
 	"gotest.tools/v3/assert"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 
+	"github.com/crunchydata/postgres-operator/internal/feature"
 	"github.com/crunchydata/postgres-operator/internal/pki"
 	"github.com/crunchydata/postgres-operator/internal/postgres"
-	"github.com/crunchydata/postgres-operator/internal/util"
+	"github.com/crunchydata/postgres-operator/internal/testing/cmp"
 	"github.com/crunchydata/postgres-operator/pkg/apis/postgres-operator.crunchydata.com/v1beta1"
 )
 
@@ -103,8 +93,8 @@ func TestSecret(t *testing.T) {
 func TestPod(t *testing.T) {
 	t.Parallel()
 
-	// Initialize the feature gate
-	assert.NilError(t, util.AddAndSetFeatureGates(""))
+	features := feature.NewGate()
+	ctx := feature.NewContext(context.Background(), features)
 
 	cluster := new(v1beta1.PostgresCluster)
 	configMap := new(corev1.ConfigMap)
@@ -112,7 +102,7 @@ func TestPod(t *testing.T) {
 	secret := new(corev1.Secret)
 	pod := new(corev1.PodSpec)
 
-	call := func() { Pod(cluster, configMap, primaryCertificate, secret, pod) }
+	call := func() { Pod(ctx, cluster, configMap, primaryCertificate, secret, pod) }
 
 	t.Run("Disabled", func(t *testing.T) {
 		before := pod.DeepCopy()
@@ -129,7 +119,7 @@ func TestPod(t *testing.T) {
 
 		call()
 
-		assert.Assert(t, marshalMatches(pod, `
+		assert.Assert(t, cmp.MarshalMatches(pod, `
 containers:
 - command:
   - pgbouncer
@@ -148,6 +138,8 @@ containers:
     privileged: false
     readOnlyRootFilesystem: true
     runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
   volumeMounts:
   - mountPath: /etc/pgbouncer
     name: pgbouncer-config
@@ -158,11 +150,11 @@ containers:
   - --
   - |-
     monitor() {
-    exec {fd}<> <(:)
-    while read -r -t 5 -u "${fd}" || true; do
-      if [ "${directory}" -nt "/proc/self/fd/${fd}" ] && pkill -HUP --exact pgbouncer
+    exec {fd}<> <(:||:)
+    while read -r -t 5 -u "${fd}" ||:; do
+      if [[ "${directory}" -nt "/proc/self/fd/${fd}" ]] && pkill -HUP --exact pgbouncer
       then
-        exec {fd}>&- && exec {fd}<> <(:)
+        exec {fd}>&- && exec {fd}<> <(:||:)
         stat --format='Loaded configuration dated %y' "${directory}"
       fi
     done
@@ -179,6 +171,8 @@ containers:
     privileged: false
     readOnlyRootFilesystem: true
     runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
   volumeMounts:
   - mountPath: /etc/pgbouncer
     name: pgbouncer-config
@@ -235,7 +229,7 @@ volumes:
 
 		call()
 
-		assert.Assert(t, marshalMatches(pod, `
+		assert.Assert(t, cmp.MarshalMatches(pod, `
 containers:
 - command:
   - pgbouncer
@@ -258,6 +252,8 @@ containers:
     privileged: false
     readOnlyRootFilesystem: true
     runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
   volumeMounts:
   - mountPath: /etc/pgbouncer
     name: pgbouncer-config
@@ -268,11 +264,11 @@ containers:
   - --
   - |-
     monitor() {
-    exec {fd}<> <(:)
-    while read -r -t 5 -u "${fd}" || true; do
-      if [ "${directory}" -nt "/proc/self/fd/${fd}" ] && pkill -HUP --exact pgbouncer
+    exec {fd}<> <(:||:)
+    while read -r -t 5 -u "${fd}" ||:; do
+      if [[ "${directory}" -nt "/proc/self/fd/${fd}" ]] && pkill -HUP --exact pgbouncer
       then
-        exec {fd}>&- && exec {fd}<> <(:)
+        exec {fd}>&- && exec {fd}<> <(:||:)
         stat --format='Loaded configuration dated %y' "${directory}"
       fi
     done
@@ -294,6 +290,8 @@ containers:
     privileged: false
     readOnlyRootFilesystem: true
     runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
   volumeMounts:
   - mountPath: /etc/pgbouncer
     name: pgbouncer-config
@@ -341,7 +339,7 @@ volumes:
 
 		call()
 
-		assert.Assert(t, marshalMatches(pod, `
+		assert.Assert(t, cmp.MarshalMatches(pod, `
 containers:
 - command:
   - pgbouncer
@@ -364,6 +362,8 @@ containers:
     privileged: false
     readOnlyRootFilesystem: true
     runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
   volumeMounts:
   - mountPath: /etc/pgbouncer
     name: pgbouncer-config
@@ -374,11 +374,11 @@ containers:
   - --
   - |-
     monitor() {
-    exec {fd}<> <(:)
-    while read -r -t 5 -u "${fd}" || true; do
-      if [ "${directory}" -nt "/proc/self/fd/${fd}" ] && pkill -HUP --exact pgbouncer
+    exec {fd}<> <(:||:)
+    while read -r -t 5 -u "${fd}" ||:; do
+      if [[ "${directory}" -nt "/proc/self/fd/${fd}" ]] && pkill -HUP --exact pgbouncer
       then
-        exec {fd}>&- && exec {fd}<> <(:)
+        exec {fd}>&- && exec {fd}<> <(:||:)
         stat --format='Loaded configuration dated %y' "${directory}"
       fi
     done
@@ -399,6 +399,8 @@ containers:
     privileged: false
     readOnlyRootFilesystem: true
     runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
   volumeMounts:
   - mountPath: /etc/pgbouncer
     name: pgbouncer-config
@@ -445,7 +447,9 @@ volumes:
 		})
 
 		t.Run("SidecarEnabled", func(t *testing.T) {
-			assert.NilError(t, util.AddAndSetFeatureGates(string(util.PGBouncerSidecars+"=true")))
+			assert.NilError(t, features.SetFromMap(map[string]bool{
+				feature.PGBouncerSidecars: true,
+			}))
 			call()
 
 			assert.Equal(t, len(pod.Containers), 3, "expected 3 containers in Pod, got %d", len(pod.Containers))
@@ -487,6 +491,6 @@ func TestPostgreSQL(t *testing.T) {
 				Mandatory: postgresqlHBAs(),
 			},
 			// postgres.HostBasedAuthentication has unexported fields. Call String() to compare.
-			cmp.Transformer("", postgres.HostBasedAuthentication.String))
+			gocmp.Transformer("", postgres.HostBasedAuthentication.String))
 	})
 }

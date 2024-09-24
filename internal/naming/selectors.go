@@ -1,17 +1,6 @@
-/*
- Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
- http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+// Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
 
 package naming
 
@@ -42,6 +31,18 @@ func Cluster(cluster string) metav1.LabelSelector {
 	return metav1.LabelSelector{
 		MatchLabels: map[string]string{
 			LabelCluster: cluster,
+		},
+	}
+}
+
+// ClusterBackupJobs selects things for all existing backup jobs in cluster.
+func ClusterBackupJobs(cluster string) metav1.LabelSelector {
+	return metav1.LabelSelector{
+		MatchLabels: map[string]string{
+			LabelCluster: cluster,
+		},
+		MatchExpressions: []metav1.LabelSelectorRequirement{
+			{Key: LabelPGBackRestBackup, Operator: metav1.LabelSelectorOpExists},
 		},
 	}
 }
@@ -137,13 +138,6 @@ func ClusterPostgresUsers(cluster string) metav1.LabelSelector {
 			{Key: LabelPostgresUser, Operator: metav1.LabelSelectorOpExists},
 		},
 	}
-}
-
-// ClusterPrimary selects things for the Primary PostgreSQL instance.
-func ClusterPrimary(cluster string) metav1.LabelSelector {
-	s := ClusterInstances(cluster)
-	s.MatchLabels[LabelRole] = RolePatroniLeader
-	return s
 }
 
 // CrunchyBridgeClusterPostgresRoles selects things labeled for CrunchyBridgeCluster

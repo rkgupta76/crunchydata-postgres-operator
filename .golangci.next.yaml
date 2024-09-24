@@ -9,11 +9,11 @@ linters:
   disable-all: true
   enable:
     - contextcheck
+    - err113
     - errchkjson
     - gocritic
     - godot
     - godox
-    - goerr113
     - gofumpt
     - gosec # exclude-use-default
     - nilnil
@@ -38,7 +38,3 @@ linters-settings:
     # https://github.com/kulti/thelper/issues/27
     tb:   { begin: true, first: true }
     test: { begin: true, first: true, name: true }
-
-run:
-  build-tags:
-    - envtest

@@ -1,17 +1,6 @@
-/*
- Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
- http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+// Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
 
 package v1beta1
 
@@ -33,8 +22,8 @@ type PostgresClusterSpec struct {
 	DataSource *DataSource `json:"dataSource,omitempty"`
 
 	// PostgreSQL backup configuration
-	// +kubebuilder:validation:Required
-	Backups Backups `json:"backups"`
+	// +optional
+	Backups Backups `json:"backups,omitempty"`
 
 	// The secret containing the Certificates and Keys to encrypt PostgreSQL
 	// traffic will need to contain the server TLS certificate, TLS key and the
@@ -123,7 +112,7 @@ type PostgresClusterSpec struct {
 	// The major version of PostgreSQL installed in the PostgreSQL image
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Minimum=10
-	// +kubebuilder:validation:Maximum=16
+	// +kubebuilder:validation:Maximum=17
 	// +operator-sdk:csv:customresourcedefinitions:type=spec,order=1
 	PostgresVersion int `json:"postgresVersion"`
 
@@ -175,6 +164,7 @@ type PostgresClusterSpec struct {
 	// from this list does NOT drop the user nor revoke their access.
 	// +listType=map
 	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=64
 	// +optional
 	Users []PostgresUserSpec `json:"users,omitempty"`
 
@@ -321,8 +311,12 @@ func (s *PostgresClusterSpec) Default() {
 type Backups struct {
 
 	// pgBackRest archive configuration
-	// +kubebuilder:validation:Required
+	// +optional
 	PGBackRest PGBackRestArchive `json:"pgbackrest"`
+
+	// VolumeSnapshot configuration
+	// +optional
+	Snapshots *VolumeSnapshots `json:"snapshots,omitempty"`
 }
 
 // PostgresClusterStatus defines the observed state of PostgresCluster
@@ -344,11 +338,9 @@ type PostgresClusterStatus struct {
 	// +optional
 	PGBackRest *PGBackRestStatus `json:"pgbackrest,omitempty"`
 
-	// Version information for installations with a registration requirement.
 	// +optional
 	RegistrationRequired *RegistrationRequirementStatus `json:"registrationRequired,omitempty"`
 
-	// Signals the need for a token to be applied when registration is required.
 	// +optional
 	TokenRequired string `json:"tokenRequired,omitempty"`
 
@@ -405,8 +397,7 @@ const (
 	PersistentVolumeResizing   = "PersistentVolumeResizing"
 	PostgresClusterProgressing = "Progressing"
 	ProxyAvailable             = "ProxyAvailable"
-	RegistrationRequired       = "RegistrationRequired"
-	TokenRequired              = "TokenRequired"
+	Registered                 = "Registered"
 )
 
 type PostgresInstanceSetSpec struct {
@@ -556,6 +547,10 @@ type PostgresInstanceSetStatus struct {
 	// Total number of pods that have the desired specification.
 	// +optional
 	UpdatedReplicas int32 `json:"updatedReplicas,omitempty"`
+
+	// Desired Size of the pgData volume
+	// +optional
+	DesiredPGDataVolume map[string]string `json:"desiredPGDataVolume,omitempty"`
 }
 
 // PostgresProxySpec is a union of the supported PostgreSQL proxies.
@@ -693,4 +688,11 @@ func NewPostgresCluster() *PostgresCluster {
 	cluster := &PostgresCluster{}
 	cluster.SetGroupVersionKind(GroupVersion.WithKind("PostgresCluster"))
 	return cluster
+}
+
+// VolumeSnapshots defines the configuration for VolumeSnapshots
+type VolumeSnapshots struct {
+	// Name of the VolumeSnapshotClass that should be used by VolumeSnapshots
+	// +kubebuilder:validation:Required
+	VolumeSnapshotClassName string `json:"volumeSnapshotClassName"`
 }

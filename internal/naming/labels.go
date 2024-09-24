@@ -1,17 +1,6 @@
-/*
- Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
- http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+// Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
 
 package naming
 
@@ -151,6 +140,9 @@ const (
 	// BackupReplicaCreate is the backup type for the backup taken to enable pgBackRest replica
 	// creation
 	BackupReplicaCreate BackupJobType = "replica-create"
+
+	// BackupScheduled is the backup type utilized for scheduled backups
+	BackupScheduled BackupJobType = "scheduled"
 )
 
 const (
@@ -270,6 +262,7 @@ func PGBackRestCronJobLabels(clusterName, repoName, backupType string) labels.Se
 	cronJobLabels := map[string]string{
 		LabelPGBackRestRepo:    repoName,
 		LabelPGBackRestCronJob: backupType,
+		LabelPGBackRestBackup:  string(BackupScheduled),
 	}
 	return labels.Merge(commonLabels, cronJobLabels)
 }
@@ -297,4 +290,34 @@ func PGBackRestRepoVolumeLabels(clusterName, repoName string) labels.Set {
 		LabelData:                 DataPGBackRest,
 	}
 	return labels.Merge(repoLabels, repoVolLabels)
+}
+
+// StandalonePGAdminLabels return labels for standalone pgAdmin resources
+func StandalonePGAdminLabels(pgAdminName string) labels.Set {
+	return map[string]string{
+		LabelStandalonePGAdmin: pgAdminName,
+		LabelRole:              RolePGAdmin,
+	}
+}
+
+// StandalonePGAdminSelector provides a selector for standalone pgAdmin resources
+func StandalonePGAdminSelector(pgAdminName string) labels.Selector {
+	return StandalonePGAdminLabels(pgAdminName).AsSelector()
+}
+
+// StandalonePGAdminDataLabels returns the labels for standalone pgAdmin resources
+// that contain or mount data
+func StandalonePGAdminDataLabels(pgAdminName string) labels.Set {
+	return labels.Merge(
+		StandalonePGAdminLabels(pgAdminName),
+		map[string]string{
+			LabelData: DataPGAdmin,
+		},
+	)
+}
+
+// StandalonePGAdminDataSelector returns a selector for standalone pgAdmin resources
+// that contain or mount data
+func StandalonePGAdminDataSelector(pgAdmiName string) labels.Selector {
+	return StandalonePGAdminDataLabels(pgAdmiName).AsSelector()
 }

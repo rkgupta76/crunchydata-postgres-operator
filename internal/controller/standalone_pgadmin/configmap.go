@@ -1,16 +1,6 @@
 // Copyright 2023 - 2024 Crunchy Data Solutions, Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package standalone_pgadmin
 
@@ -20,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -59,10 +50,7 @@ func configmap(pgadmin *v1beta1.PGAdmin,
 	configmap.Annotations = pgadmin.Spec.Metadata.GetAnnotationsOrNil()
 	configmap.Labels = naming.Merge(
 		pgadmin.Spec.Metadata.GetLabelsOrNil(),
-		map[string]string{
-			naming.LabelStandalonePGAdmin: pgadmin.Name,
-			naming.LabelRole:              naming.RolePGAdmin,
-		})
+		naming.StandalonePGAdminLabels(pgadmin.Name))
 
 	// TODO(tjmoore4): Populate configuration details.
 	initialize.StringMap(&configmap.Data)
@@ -74,6 +62,11 @@ func configmap(pgadmin *v1beta1.PGAdmin,
 	clusterSettings, err := generateClusterConfig(clusters)
 	if err == nil {
 		configmap.Data[settingsClusterMapKey] = clusterSettings
+	}
+
+	gunicornSettings, err := generateGunicornConfig(pgadmin)
+	if err == nil {
+		configmap.Data[gunicornConfigKey] = gunicornSettings
 	}
 
 	return configmap, err
@@ -179,5 +172,38 @@ func generateClusterConfig(
 		"Servers": clusterServers,
 	}
 	err := encoder.Encode(servers)
+	return buffer.String(), err
+}
+
+// generateGunicornConfig generates the config settings for the gunicorn server
+// - https://docs.gunicorn.org/en/latest/settings.html
+func generateGunicornConfig(pgadmin *v1beta1.PGAdmin) (string, error) {
+	settings := map[string]any{
+		// Bind to all IPv4 addresses and set 25 threads by default.
+		// - https://docs.gunicorn.org/en/latest/settings.html#bind
+		// - https://docs.gunicorn.org/en/latest/settings.html#threads
+		"bind":    "0.0.0.0:" + strconv.Itoa(pgAdminPort),
+		"threads": 25,
+	}
+
+	// Copy any specified settings over the defaults.
+	for k, v := range pgadmin.Spec.Config.Gunicorn {
+		settings[k] = v
+	}
+
+	// Write mandatory settings over any specified ones.
+	// - https://docs.gunicorn.org/en/latest/settings.html#workers
+	settings["workers"] = 1
+
+	// To avoid spurious reconciles, the following value must not change when
+	// the spec does not change. [json.Encoder] and [json.Marshal] do this by
+	// emitting map keys in sorted order. Indent so the value is not rendered
+	// as one long line by `kubectl`.
+	buffer := new(bytes.Buffer)
+	encoder := json.NewEncoder(buffer)
+	encoder.SetEscapeHTML(false)
+	encoder.SetIndent("", "  ")
+	err := encoder.Encode(settings)
+
 	return buffer.String(), err
 }

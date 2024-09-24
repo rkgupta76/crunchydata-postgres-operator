@@ -1,17 +1,6 @@
-/*
- Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
- http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+// Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
 
 package postgrescluster
 
@@ -27,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/crunchydata/postgres-operator/internal/config"
+	"github.com/crunchydata/postgres-operator/internal/feature"
 	"github.com/crunchydata/postgres-operator/internal/initialize"
 	"github.com/crunchydata/postgres-operator/internal/logging"
 	"github.com/crunchydata/postgres-operator/internal/naming"
@@ -144,9 +134,9 @@ func (r *Reconciler) reconcilePGMonitorExporter(ctx context.Context,
 
 		// Apply the necessary SQL and record its hash in cluster.Status
 		if err == nil {
-			err = action(ctx, func(_ context.Context, stdin io.Reader,
+			err = action(ctx, func(ctx context.Context, stdin io.Reader,
 				stdout, stderr io.Writer, command ...string) error {
-				return r.PodExec(writablePod.Namespace, writablePod.Name, naming.ContainerDatabase, stdin, stdout, stderr, command...)
+				return r.PodExec(ctx, writablePod.Namespace, writablePod.Name, naming.ContainerDatabase, stdin, stdout, stderr, command...)
 			})
 		}
 		if err == nil {
@@ -240,11 +230,12 @@ func (r *Reconciler) reconcileMonitoringSecret(
 // addPGMonitorToInstancePodSpec performs the necessary setup to add
 // pgMonitor resources on a PodTemplateSpec
 func addPGMonitorToInstancePodSpec(
+	ctx context.Context,
 	cluster *v1beta1.PostgresCluster,
 	template *corev1.PodTemplateSpec,
 	exporterQueriesConfig, exporterWebConfig *corev1.ConfigMap) error {
 
-	err := addPGMonitorExporterToInstancePodSpec(cluster, template, exporterQueriesConfig, exporterWebConfig)
+	err := addPGMonitorExporterToInstancePodSpec(ctx, cluster, template, exporterQueriesConfig, exporterWebConfig)
 
 	return err
 }
@@ -255,6 +246,7 @@ func addPGMonitorToInstancePodSpec(
 // the exporter container cannot be created; Testing relies on ensuring the
 // monitoring secret is available
 func addPGMonitorExporterToInstancePodSpec(
+	ctx context.Context,
 	cluster *v1beta1.PostgresCluster,
 	template *corev1.PodTemplateSpec,
 	exporterQueriesConfig, exporterWebConfig *corev1.ConfigMap) error {
@@ -323,7 +315,7 @@ func addPGMonitorExporterToInstancePodSpec(
 	// Therefore, we only want to add the default queries ConfigMap as a source for the
 	// "exporter-config" volume if the AppendCustomQueries feature gate is turned on OR if the
 	// user has not provided any custom configuration.
-	if util.DefaultMutableFeatureGate.Enabled(util.AppendCustomQueries) ||
+	if feature.Enabled(ctx, feature.AppendCustomQueries) ||
 		cluster.Spec.Monitoring.PGMonitor.Exporter.Configuration == nil {
 
 		defaultConfigVolumeProjection := corev1.VolumeProjection{

@@ -1,35 +1,23 @@
 // Copyright 2023 - 2024 Crunchy Data Solutions, Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package standalone_pgadmin
 
 import (
 	"context"
+	"io"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
-	"k8s.io/apimachinery/pkg/runtime"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	"sigs.k8s.io/controller-runtime/pkg/event"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
-	"sigs.k8s.io/controller-runtime/pkg/source"
 
+	controllerruntime "github.com/crunchydata/postgres-operator/internal/controller/runtime"
 	"github.com/crunchydata/postgres-operator/internal/logging"
 	"github.com/crunchydata/postgres-operator/pkg/apis/postgres-operator.crunchydata.com/v1beta1"
 )
@@ -37,9 +25,12 @@ import (
 // PGAdminReconciler reconciles a PGAdmin object
 type PGAdminReconciler struct {
 	client.Client
-	Owner       client.FieldOwner
+	Owner   client.FieldOwner
+	PodExec func(
+		ctx context.Context, namespace, pod, container string,
+		stdin io.Reader, stdout, stderr io.Writer, command ...string,
+	) error
 	Recorder    record.EventRecorder
-	Scheme      *runtime.Scheme
 	IsOpenShift bool
 }
 
@@ -53,42 +44,30 @@ type PGAdminReconciler struct {
 //
 // TODO(tjmoore4): This function is duplicated from a version that takes a PostgresCluster object.
 func (r *PGAdminReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.PodExec == nil {
+		var err error
+		r.PodExec, err = controllerruntime.NewPodExecutor(mgr.GetConfig())
+		if err != nil {
+			return err
+		}
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1beta1.PGAdmin{}).
 		Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&corev1.Secret{}).
 		Owns(&appsv1.StatefulSet{}).
+		Owns(&corev1.Service{}).
 		Watches(
-			&source.Kind{Type: v1beta1.NewPostgresCluster()},
+			v1beta1.NewPostgresCluster(),
 			r.watchPostgresClusters(),
 		).
+		Watches(
+			&corev1.Secret{},
+			r.watchForRelatedSecret(),
+		).
 		Complete(r)
-}
-
-// watchPostgresClusters returns a [handler.EventHandler] for PostgresClusters.
-func (r *PGAdminReconciler) watchPostgresClusters() handler.Funcs {
-	handle := func(cluster client.Object, q workqueue.RateLimitingInterface) {
-		ctx := context.Background()
-		for _, pgadmin := range r.findPGAdminsForPostgresCluster(ctx, cluster) {
-
-			q.Add(ctrl.Request{
-				NamespacedName: client.ObjectKeyFromObject(pgadmin),
-			})
-		}
-	}
-
-	return handler.Funcs{
-		CreateFunc: func(e event.CreateEvent, q workqueue.RateLimitingInterface) {
-			handle(e.Object, q)
-		},
-		UpdateFunc: func(e event.UpdateEvent, q workqueue.RateLimitingInterface) {
-			handle(e.ObjectNew, q)
-		},
-		DeleteFunc: func(e event.DeleteEvent, q workqueue.RateLimitingInterface) {
-			handle(e.Object, q)
-		},
-	}
 }
 
 //+kubebuilder:rbac:groups="postgres-operator.crunchydata.com",resources="pgadmins",verbs={get}
@@ -123,7 +102,7 @@ func (r *PGAdminReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}()
 
-	log.Info("Reconciling pgAdmin")
+	log.V(1).Info("Reconciling pgAdmin")
 
 	// Set defaults if unset
 	pgAdmin.Default()
@@ -132,9 +111,8 @@ func (r *PGAdminReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		configmap  *corev1.ConfigMap
 		dataVolume *corev1.PersistentVolumeClaim
 		clusters   map[string]*v1beta1.PostgresClusterList
+		_          *corev1.Service
 	)
-
-	_, err = r.reconcilePGAdminSecret(ctx, pgAdmin)
 
 	if err == nil {
 		clusters, err = r.getClustersForPGAdmin(ctx, pgAdmin)
@@ -146,14 +124,20 @@ func (r *PGAdminReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		dataVolume, err = r.reconcilePGAdminDataVolume(ctx, pgAdmin)
 	}
 	if err == nil {
+		err = r.reconcilePGAdminService(ctx, pgAdmin)
+	}
+	if err == nil {
 		err = r.reconcilePGAdminStatefulSet(ctx, pgAdmin, configmap, dataVolume)
+	}
+	if err == nil {
+		err = r.reconcilePGAdminUsers(ctx, pgAdmin)
 	}
 
 	if err == nil {
 		// at this point everything reconciled successfully, and we can update the
 		// observedGeneration
 		pgAdmin.Status.ObservedGeneration = pgAdmin.GetGeneration()
-		log.V(1).Info("reconciled cluster")
+		log.V(1).Info("Reconciled pgAdmin")
 	}
 
 	return ctrl.Result{}, err
@@ -175,4 +159,19 @@ func (r *PGAdminReconciler) setControllerReference(
 	owner *v1beta1.PGAdmin, controlled client.Object,
 ) error {
 	return controllerutil.SetControllerReference(owner, controlled, r.Client.Scheme())
+}
+
+// deleteControlled safely deletes object when it is controlled by pgAdmin.
+func (r *PGAdminReconciler) deleteControlled(
+	ctx context.Context, pgadmin *v1beta1.PGAdmin, object client.Object,
+) error {
+	if metav1.IsControlledBy(object, pgadmin) {
+		uid := object.GetUID()
+		version := object.GetResourceVersion()
+		exactly := client.Preconditions{UID: &uid, ResourceVersion: &version}
+
+		return r.Client.Delete(ctx, object, exactly)
+	}
+
+	return nil
 }

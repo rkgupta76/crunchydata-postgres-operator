@@ -1,17 +1,6 @@
-/*
- Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
- http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+// Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
 
 package postgrescluster
 
@@ -23,16 +12,19 @@ import (
 	"net"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/pkg/errors"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/crunchydata/postgres-operator/internal/feature"
 	"github.com/crunchydata/postgres-operator/internal/initialize"
 	"github.com/crunchydata/postgres-operator/internal/logging"
 	"github.com/crunchydata/postgres-operator/internal/naming"
@@ -197,14 +189,14 @@ func (r *Reconciler) reconcilePostgresDatabases(
 
 	ctx = logging.NewContext(ctx, logging.FromContext(ctx).WithValues("pod", pod.Name))
 	podExecutor = func(
-		_ context.Context, stdin io.Reader, stdout, stderr io.Writer, command ...string,
+		ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, command ...string,
 	) error {
-		return r.PodExec(pod.Namespace, pod.Name, container, stdin, stdout, stderr, command...)
+		return r.PodExec(ctx, pod.Namespace, pod.Name, container, stdin, stdout, stderr, command...)
 	}
 
 	// Gather the list of database that should exist in PostgreSQL.
 
-	databases := sets.String{}
+	databases := sets.Set[string]{}
 	if cluster.Spec.Users == nil {
 		// Users are unspecified; create one database matching the cluster name
 		// if it is also a valid database name.
@@ -229,8 +221,6 @@ func (r *Reconciler) reconcilePostgresDatabases(
 		}
 	}
 
-	// Calculate a hash of the SQL that should be executed in PostgreSQL.
-
 	var pgAuditOK, postgisInstallOK bool
 	create := func(ctx context.Context, exec postgres.Executor) error {
 		if pgAuditOK = pgaudit.EnableInPostgreSQL(ctx, exec) == nil; !pgAuditOK {
@@ -254,9 +244,10 @@ func (r *Reconciler) reconcilePostgresDatabases(
 				"Unable to install PostGIS")
 		}
 
-		return postgres.CreateDatabasesInPostgreSQL(ctx, exec, databases.List())
+		return postgres.CreateDatabasesInPostgreSQL(ctx, exec, sets.List(databases))
 	}
 
+	// Calculate a hash of the SQL that should be executed in PostgreSQL.
 	revision, err := safeHash32(func(hasher io.Writer) error {
 		// Discard log messages about executing SQL.
 		return create(logging.NewContext(ctx, logging.Discard()), func(
@@ -297,6 +288,8 @@ func (r *Reconciler) reconcilePostgresDatabases(
 func (r *Reconciler) reconcilePostgresUsers(
 	ctx context.Context, cluster *v1beta1.PostgresCluster, instances *observedInstances,
 ) error {
+	r.validatePostgresUsers(cluster)
+
 	users, secrets, err := r.reconcilePostgresUserSecrets(ctx, cluster)
 	if err == nil {
 		err = r.reconcilePostgresUsersInPostgreSQL(ctx, cluster, instances, users, secrets)
@@ -309,6 +302,40 @@ func (r *Reconciler) reconcilePostgresUsers(
 		err = r.reconcilePGAdminUsers(ctx, cluster, users, secrets)
 	}
 	return err
+}
+
+// validatePostgresUsers emits warnings when cluster.Spec.Users contains values
+// that are no longer valid. NOTE(ratcheting) NOTE(validation)
+// - https://docs.k8s.io/tasks/extend-kubernetes/custom-resources/custom-resource-definitions/#validation-ratcheting
+func (r *Reconciler) validatePostgresUsers(cluster *v1beta1.PostgresCluster) {
+	if len(cluster.Spec.Users) == 0 {
+		return
+	}
+
+	path := field.NewPath("spec", "users")
+	reComments := regexp.MustCompile(`(?:--|/[*]|[*]/)`)
+	rePassword := regexp.MustCompile(`(?i:PASSWORD)`)
+
+	for i := range cluster.Spec.Users {
+		errs := field.ErrorList{}
+		spec := cluster.Spec.Users[i]
+
+		if reComments.MatchString(spec.Options) {
+			errs = append(errs,
+				field.Invalid(path.Index(i).Child("options"), spec.Options,
+					"cannot contain comments"))
+		}
+		if rePassword.MatchString(spec.Options) {
+			errs = append(errs,
+				field.Invalid(path.Index(i).Child("options"), spec.Options,
+					"cannot assign password"))
+		}
+
+		if len(errs) > 0 {
+			r.Recorder.Event(cluster, corev1.EventTypeWarning, "InvalidUser",
+				errs.ToAggregate().Error())
+		}
+	}
 }
 
 // +kubebuilder:rbac:groups="",resources="secrets",verbs={list}
@@ -374,6 +401,36 @@ func (r *Reconciler) reconcilePostgresUserSecrets(
 				client.MatchingLabelsSelector{Selector: selector},
 			))
 	}
+
+	// Sorts the slice of secrets.Items based on secrets with identical labels
+	// If one secret has "pguser" in its name and the other does not, the
+	// one without "pguser" is moved to the front.
+	// If both secrets have "pguser" in their names or neither has "pguser", they
+	// are sorted by creation timestamp.
+	// If two secrets have the same creation timestamp, they are further sorted by name.
+	// The secret to be used by PGO is put at the end of the sorted slice.
+	sort.Slice(secrets.Items, func(i, j int) bool {
+		// Check if either secrets have "pguser" in their names
+		isIPgUser := strings.Contains(secrets.Items[i].Name, "pguser")
+		isJPgUser := strings.Contains(secrets.Items[j].Name, "pguser")
+
+		// If one secret has "pguser" and the other does not,
+		// move the one without "pguser" to the front
+		if isIPgUser && !isJPgUser {
+			return false
+		} else if !isIPgUser && isJPgUser {
+			return true
+		}
+
+		if secrets.Items[i].CreationTimestamp.Time.Equal(secrets.Items[j].CreationTimestamp.Time) {
+			// If the creation timestamps are equal, sort by name
+			return secrets.Items[i].Name < secrets.Items[j].Name
+		}
+
+		// If both secrets have "pguser" or neither have "pguser",
+		// sort by creation timestamp
+		return secrets.Items[i].CreationTimestamp.Time.After(secrets.Items[j].CreationTimestamp.Time)
+	})
 
 	// Index secrets by PostgreSQL user name and delete any that are not in the
 	// cluster spec. Keep track of the deprecated default secret to migrate its
@@ -448,9 +505,9 @@ func (r *Reconciler) reconcilePostgresUsersInPostgreSQL(
 			ctx = logging.NewContext(ctx, logging.FromContext(ctx).WithValues("pod", pod.Name))
 
 			podExecutor = func(
-				_ context.Context, stdin io.Reader, stdout, stderr io.Writer, command ...string,
+				ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, command ...string,
 			) error {
-				return r.PodExec(pod.Namespace, pod.Name, container, stdin, stdout, stderr, command...)
+				return r.PodExec(ctx, pod.Namespace, pod.Name, container, stdin, stdout, stderr, command...)
 			}
 			break
 		}
@@ -467,7 +524,7 @@ func (r *Reconciler) reconcilePostgresUsersInPostgreSQL(
 	}
 
 	write := func(ctx context.Context, exec postgres.Executor) error {
-		return postgres.WriteUsersInPostgreSQL(ctx, exec, specUsers, verifiers)
+		return postgres.WriteUsersInPostgreSQL(ctx, cluster, exec, specUsers, verifiers)
 	}
 
 	revision, err := safeHash32(func(hasher io.Writer) error {
@@ -512,7 +569,7 @@ func (r *Reconciler) reconcilePostgresUsersInPostgreSQL(
 func (r *Reconciler) reconcilePostgresDataVolume(
 	ctx context.Context, cluster *v1beta1.PostgresCluster,
 	instanceSpec *v1beta1.PostgresInstanceSetSpec, instance *appsv1.StatefulSet,
-	clusterVolumes []corev1.PersistentVolumeClaim,
+	clusterVolumes []corev1.PersistentVolumeClaim, sourceCluster *v1beta1.PostgresCluster,
 ) (*corev1.PersistentVolumeClaim, error) {
 
 	labelMap := map[string]string{
@@ -553,12 +610,113 @@ func (r *Reconciler) reconcilePostgresDataVolume(
 
 	pvc.Spec = instanceSpec.DataVolumeClaimSpec
 
+	// If a source cluster was provided and VolumeSnapshots are turned on in the source cluster and
+	// there is a VolumeSnapshot available for the source cluster that is ReadyToUse, use it as the
+	// source for the PVC. If there is an error when retrieving VolumeSnapshots, or no ReadyToUse
+	// snapshots were found, create a warning event, but continue creating PVC in the usual fashion.
+	if sourceCluster != nil && sourceCluster.Spec.Backups.Snapshots != nil && feature.Enabled(ctx, feature.VolumeSnapshots) {
+		snapshots, err := r.getSnapshotsForCluster(ctx, sourceCluster)
+		if err == nil {
+			snapshot := getLatestReadySnapshot(snapshots)
+			if snapshot != nil {
+				r.Recorder.Eventf(cluster, corev1.EventTypeNormal, "BootstrappingWithSnapshot",
+					"Snapshot found for %v; bootstrapping cluster with snapshot.", sourceCluster.Name)
+				pvc.Spec.DataSource = &corev1.TypedLocalObjectReference{
+					APIGroup: initialize.String("snapshot.storage.k8s.io"),
+					Kind:     snapshot.Kind,
+					Name:     snapshot.Name,
+				}
+			} else {
+				r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "SnapshotNotFound",
+					"No ReadyToUse snapshots were found for %v; proceeding with typical restore process.", sourceCluster.Name)
+			}
+		} else {
+			r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "SnapshotNotFound",
+				"Could not get snapshots for %v, proceeding with typical restore process.", sourceCluster.Name)
+		}
+	}
+
+	r.setVolumeSize(ctx, cluster, pvc, instanceSpec.Name)
+
+	// Clear any set limit before applying PVC. This is needed to allow the limit
+	// value to change later.
+	pvc.Spec.Resources.Limits = nil
+
 	if err == nil {
 		err = r.handlePersistentVolumeClaimError(cluster,
 			errors.WithStack(r.apply(ctx, pvc)))
 	}
 
 	return pvc, err
+}
+
+// setVolumeSize compares the potential sizes from the instance spec, status
+// and limit and sets the appropriate current value.
+func (r *Reconciler) setVolumeSize(ctx context.Context, cluster *v1beta1.PostgresCluster,
+	pvc *corev1.PersistentVolumeClaim, instanceSpecName string) {
+	log := logging.FromContext(ctx)
+
+	// Store the limit for this instance set. This value will not change below.
+	volumeLimitFromSpec := pvc.Spec.Resources.Limits.Storage()
+
+	// Capture the largest pgData volume size currently defined for a given instance set.
+	// This value will capture our desired update.
+	volumeRequestSize := pvc.Spec.Resources.Requests.Storage()
+
+	// If the request value is greater than the set limit, use the limit and issue
+	// a warning event. A limit of 0 is ignorned.
+	if !volumeLimitFromSpec.IsZero() &&
+		volumeRequestSize.Value() > volumeLimitFromSpec.Value() {
+		r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "VolumeRequestOverLimit",
+			"pgData volume request (%v) for %s/%s is greater than set limit (%v). Limit value will be used.",
+			volumeRequestSize, cluster.Name, instanceSpecName, volumeLimitFromSpec)
+
+		pvc.Spec.Resources.Requests = corev1.ResourceList{
+			corev1.ResourceStorage: *resource.NewQuantity(volumeLimitFromSpec.Value(), resource.BinarySI),
+		}
+		// Otherwise, if the limit is not set or the feature gate is not enabled, do not autogrow.
+	} else if !volumeLimitFromSpec.IsZero() && feature.Enabled(ctx, feature.AutoGrowVolumes) {
+		for i := range cluster.Status.InstanceSets {
+			if instanceSpecName == cluster.Status.InstanceSets[i].Name {
+				for _, dpv := range cluster.Status.InstanceSets[i].DesiredPGDataVolume {
+					if dpv != "" {
+						desiredRequest, err := resource.ParseQuantity(dpv)
+						if err == nil {
+							if desiredRequest.Value() > volumeRequestSize.Value() {
+								volumeRequestSize = &desiredRequest
+							}
+						} else {
+							log.Error(err, "Unable to parse volume request: "+dpv)
+						}
+					}
+				}
+			}
+		}
+
+		// If the volume request size is greater than or equal to the limit and the
+		// limit is not zero, update the request size to the limit value.
+		// If the user manually requests a lower limit that is smaller than the current
+		// or requested volume size, it will be ignored in favor of the limit value.
+		if volumeRequestSize.Value() >= volumeLimitFromSpec.Value() {
+
+			r.Recorder.Eventf(cluster, corev1.EventTypeNormal, "VolumeLimitReached",
+				"pgData volume(s) for %s/%s are at size limit (%v).", cluster.Name,
+				instanceSpecName, volumeLimitFromSpec)
+
+			// If the volume size request is greater than the limit, issue an
+			// additional event warning.
+			if volumeRequestSize.Value() > volumeLimitFromSpec.Value() {
+				r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "DesiredVolumeAboveLimit",
+					"The desired size (%v) for the %s/%s pgData volume(s) is greater than the size limit (%v).",
+					volumeRequestSize, cluster.Name, instanceSpecName, volumeLimitFromSpec)
+			}
+
+			volumeRequestSize = volumeLimitFromSpec
+		}
+		pvc.Spec.Resources.Requests = corev1.ResourceList{
+			corev1.ResourceStorage: *resource.NewQuantity(volumeRequestSize.Value(), resource.BinarySI),
+		}
+	}
 }
 
 // +kubebuilder:rbac:groups="",resources="persistentvolumeclaims",verbs={create,patch}
@@ -571,7 +729,7 @@ func (r *Reconciler) reconcileTablespaceVolumes(
 	clusterVolumes []corev1.PersistentVolumeClaim,
 ) (tablespaceVolumes []*corev1.PersistentVolumeClaim, err error) {
 
-	if !util.DefaultMutableFeatureGate.Enabled(util.TablespaceVolumes) {
+	if !feature.Enabled(ctx, feature.TablespaceVolumes) {
 		return
 	}
 
@@ -698,7 +856,7 @@ func (r *Reconciler) reconcilePostgresWALVolume(
 				// This assumes that $PGDATA matches the configured PostgreSQL "data_directory".
 				var stdout bytes.Buffer
 				err = errors.WithStack(r.PodExec(
-					observed.Pods[0].Namespace, observed.Pods[0].Name, naming.ContainerDatabase,
+					ctx, observed.Pods[0].Namespace, observed.Pods[0].Name, naming.ContainerDatabase,
 					nil, &stdout, nil, "bash", "-ceu", "--", `exec realpath "${PGDATA}/pg_wal"`))
 
 				walDirectory = strings.TrimRight(stdout.String(), "\n")
@@ -802,9 +960,9 @@ func (r *Reconciler) reconcileDatabaseInitSQL(ctx context.Context,
 	}
 
 	podExecutor = func(
-		_ context.Context, stdin io.Reader, stdout, stderr io.Writer, command ...string,
+		ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, command ...string,
 	) error {
-		return r.PodExec(pod.Namespace, pod.Name, naming.ContainerDatabase, stdin, stdout, stderr, command...)
+		return r.PodExec(ctx, pod.Namespace, pod.Name, naming.ContainerDatabase, stdin, stdout, stderr, command...)
 	}
 
 	// A writable pod executor has been found and we have the sql provided by

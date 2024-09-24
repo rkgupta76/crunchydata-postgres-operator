@@ -1,17 +1,6 @@
-/*
- Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
- http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+// Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
 
 package naming
 
@@ -76,8 +65,8 @@ func TestClusterNamesUniqueAndValid(t *testing.T) {
 		value metav1.ObjectMeta
 	}
 
-	testUniqueAndValid := func(t *testing.T, tests []test) sets.String {
-		names := sets.NewString()
+	testUniqueAndValid := func(t *testing.T, tests []test) sets.Set[string] {
+		names := sets.Set[string]{}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
 				assert.Equal(t, tt.value.Namespace, cluster.Namespace)
@@ -170,7 +159,7 @@ func TestClusterNamesUniqueAndValid(t *testing.T) {
 			assert.Assert(t, nil == validation.IsDNS1123Label(value.Name))
 
 			prefix := PostgresUserSecret(cluster, "").Name
-			for _, name := range names.List() {
+			for _, name := range sets.List(names) {
 				assert.Assert(t, !strings.HasPrefix(name, prefix), "%q may collide", name)
 			}
 		})
@@ -207,6 +196,12 @@ func TestClusterNamesUniqueAndValid(t *testing.T) {
 		testUniqueAndValid(t, []test{
 			{"ClusterPGAdmin", ClusterPGAdmin(cluster)},
 			{"PGBackRestRepoVolume", PGBackRestRepoVolume(cluster, repoName)},
+		})
+	})
+
+	t.Run("VolumeSnapshots", func(t *testing.T) {
+		testUniqueAndValid(t, []test{
+			{"ClusterVolumeSnapshot", ClusterVolumeSnapshot(cluster)},
 		})
 	})
 }
